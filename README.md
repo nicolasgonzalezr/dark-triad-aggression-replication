@@ -8,8 +8,8 @@ Replication package for **“Sex differences in the relationship between the Dar
 | --- | --- |
 | `Scripts/replicationScript.qmd` | Analysis code, including table and figure generation. |
 | `Data/replicationData.rds` | Questionnaire responses, sex, and age for the study sample. |
-| `Data/interceptsBPAQ` | Saved BPAQ intercept diagnostics used to select partial invariance constraints. |
-| `Data/interceptsSD3` | Saved SD3 intercept diagnostics used to select partial invariance constraints. |
+| `Data/interceptsBPAQ.rds` | Saved BPAQ intercept diagnostics used to select partial invariance constraints. |
+| `Data/interceptsSD3.rds` | Saved SD3 intercept diagnostics used to select partial invariance constraints. |
 | `Data/baselineBoot.rds` | Bootstrap results for the confirmatory baseline model. |
 | `Data/moderatedBoot.rds` | Bootstrap results for the confirmatory model with sex interactions. |
 | `Data/saturatedBoot.rds` | Bootstrap results for the exploratory model with all trait-by-sex interactions. |
