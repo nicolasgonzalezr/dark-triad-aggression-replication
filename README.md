@@ -36,8 +36,6 @@ Quarto is needed to render the analysis document. PNG table exports require Chro
 
 The script defaults to using saved bootstrap results (`runBootstraps <- FALSE`) and intercept diagnostics (`runDiagnostics <- FALSE`). Adjust `availableCores` to your computer, or set `parallelSupported <- FALSE` for sequential execution.
 
-Analyses use 500 plausible-value draws; bootstrap analyses target 9,999 successful resamples with 20 draws per resample. The master seed is 779.
-
 To rerun the bootstrap from scratch, set both `runBootstraps` and `restartBootstraps` to `TRUE`. This is computationally intensive and overwrites the saved bootstrap files.
 
 Tables and figures are exported to `Tables/` and `Plots/`.
