@@ -2,6 +2,22 @@
 
 Replication package for **“Sex differences in the relationship between the Dark Triad and trait aggression: A variance-weighted interpretation of the bifactor model.”**
 
+## Replication files
+
+| File | Description |
+| --- | --- |
+| `Scripts/replicationScript.qmd` | Analysis code, including table and figure generation. |
+| `Data/replicationData.rds` | Questionnaire responses, sex, and age for the study sample. |
+| `Data/interceptsBPAQ` | Saved BPAQ intercept diagnostics used to select partial invariance constraints. |
+| `Data/interceptsSD3` | Saved SD3 intercept diagnostics used to select partial invariance constraints. |
+| `Data/baselineBoot.rds` | Bootstrap results for the confirmatory baseline model. |
+| `Data/moderatedBoot.rds` | Bootstrap results for the confirmatory model with sex interactions. |
+| `Data/saturatedBoot.rds` | Bootstrap results for the exploratory model with all trait-by-sex interactions. |
+| `Data/parsimoniousBoot.rds` | Bootstrap results for the exploratory parsimonious model and Machiavellianism-reference sensitivity analysis. |
+| `Data/correlatedFactorsBoot.rds` | Bootstrap results for the correlated three-factor SD3 model. |
+| `Data/psychopathyReferenceBoot.rds` | Bootstrap results for the bifactor S−1 model with psychopathy as the reference facet. |
+| `Data/narcissismReferenceBoot.rds` | Bootstrap results for the bifactor S−1 model with narcissism as the reference facet. |
+
 ## Requirements
 
 R 4.5.3; lavaan 0.6-21; semTools 0.5-8; lessSEM 1.5.7. Additional packages:
