@@ -30,7 +30,7 @@ Quarto is needed to render the analysis document. PNG table exports require Chro
 
 ## Run the analyses
 
-1. Create a project or set directory at the parent folder.
+1. Create a project or set working directory at the parent folder.
 3. Open `Scripts/replicationScript.qmd` and execute the R chunks in order.
 
 The script defaults to using saved bootstrap results (`runBootstraps <- FALSE`). Adjust `availableCores` to your computer, or set `parallelSupported <- FALSE` for sequential execution.
