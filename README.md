@@ -30,11 +30,10 @@ Quarto is needed to render the analysis document. PNG table exports require Chro
 
 ## Run the analyses
 
-1. Place the analysis document in `Scripts/`, and the dataset (`replicationData.rds`), saved intercept diagnostics, and bootstrap results in `Data/`.
-2. Create `Tables/` and `Plots/` alongside those folders.
-3. Open `Scripts/replicationScript.qmd` and execute the R chunks in order, with the working directory set to `Scripts/`.
+1. Create a project or set directory at the parent folder.
+3. Open `Scripts/replicationScript.qmd` and execute the R chunks in order.
 
-The script defaults to using saved bootstrap results (`runBootstraps <- FALSE`) and intercept diagnostics (`runDiagnostics <- FALSE`). Adjust `availableCores` to your computer, or set `parallelSupported <- FALSE` for sequential execution.
+The script defaults to using saved bootstrap results (`runBootstraps <- FALSE`). Adjust `availableCores` to your computer, or set `parallelSupported <- FALSE` for sequential execution.
 
 To rerun the bootstrap from scratch, set both `runBootstraps` and `restartBootstraps` to `TRUE`. This is computationally intensive and overwrites the saved bootstrap files.
 
