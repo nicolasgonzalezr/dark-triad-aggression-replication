@@ -316,7 +316,7 @@ if (export) {
     )
   }
   
-  descriptivesTableLatex <- descriptivesTableLatex %>%
+  descriptivesTableLatex <- descriptivesTable %>%
     mutate(
       across(
         -1,
@@ -7403,53 +7403,508 @@ if(export) {
 }
 ```
 
-### Invariance sensitivity
-
-#### Metric
+### VWLE Multigroup robustness
 
 ```{r}
 
-if (parallelSupported) {
-  structuralFit <- pbmcapply::pbmclapply(
-    X = 1:M,
-    FUN = plausibleFun,
-    structuralModel = saturatedModel, 
-    measurementFit = congenialMetricFit,
-    VWLE=TRUE,
-    g=c("Reference", "Reference:Male"),
-    s=list(c("Psychopathy", "Narcissism"), c("Psychopathy:Male", "Narcissism:Male")),
-    covariatesVWLE = c("Male"),
-    data = replicationData,
-    masterSeed = masterSeed,
-    mc.cores = availableCores,
-    mc.set.seed = TRUE
-  )
-} else {
-  structuralFit <- lapply(
-    X = 1:M,
-    FUN = plausibleFun,
-    structuralModel = saturatedModel, 
-    measurementFit = congenialMetricFit,
-    VWLE=TRUE,
-    g=c("Reference", "Reference:Male"),
-    s=list(c("Psychopathy", "Narcissism"), c("Psychopathy:Male", "Narcissism:Male")),
-    covariatesVWLE = c("Male"),
-    data = replicationData,
-    masterSeed = masterSeed
-  )
-}
+set.seed(masterSeed)
 
-metricStructuralFit <- processFunPV(structuralFit)
+DTFS <- lavPredict(congenialPartialFit, method = "Regression", transform = FALSE)
+caseIdx <- unlist(lavInspect(congenialPartialFit, "case.idx"), use.names = FALSE)
+DTFSmat <- do.call(rbind, DTFS)
+FSDF <- cbind(
+  replicationData[caseIdx, , drop = FALSE],
+  DTFSmat
+)
 
-metricStructuralFit %>%
-  filter(op %in% c("~", "gof") & !(rhs %in% c("R2","N"))) %>%
-  dplyr::select(lhs, rhs, Estimate, SE, Z, P) %>%
+lambdaMatrix <- as.matrix(lavInspect(congenialPartialFit, "est")$`0`$lambda)[lavNames(congenialPartialFit, type="ov.ind"), lavNames(congenialPartialFit, type="lv")]
+
+# ---------------------------------- INTERACTION MODEL -------------------------------------
+
+interactionFit <- sem(
+  model=saturatedModel,
+  estimator="MLR",
+  meanstructure=TRUE,
+  data = FSDF
+)
+
+response <- c(
+  lavNames(interactionFit, type = "ov.y"),
+  lavNames(interactionFit, type = "lv.y")
+)
+
+g <- c("Reference", "Reference:Male")
+
+s <- list(c("Psychopathy", "Narcissism"), c("Psychopathy:Male", "Narcissism:Male"))
+
+covariates <- c("Male")
+
+coefMatrix <- as.matrix(lavInspect(interactionFit, "est")$beta)[response, ] #Ensure order
+
+order <- colnames(coefMatrix)
+
+covMatrix <- as.matrix(lavInspect(interactionFit, "cov.all"))
+
+covMatrix <- covMatrix[order, order, drop=FALSE]
+
+vwleResult <- vwleFun(
+  response=response, 
+  g=g, 
+  s=s, 
+  covariates=covariates, 
+  lambdaMatrix=lambdaMatrix,
+  covMatrix=covMatrix,
+  coefMatrix=coefMatrix
+)
+
+vwleList <- lapply(
+  seq_len(nrow(vwleResult$lvl)), 
+  function(i) {
+    out <- lapply(
+      seq_len(ncol(vwleResult$lvl)), 
+      function(j){
+        return(vwleResult$lvl[i,j, drop=FALSE])
+      }
+    )
+    return(out)
+  }
+)
+
+vwleList <- unlist(vwleList, recursive=FALSE)
+
+vwleRowsInteraction <- do.call(
+  rbind,
+  lapply(
+    vwleList,
+    function(i) {
+      left <- rownames(i)
+      right <- colnames(i)
+      
+      target <- coefMatrix[left, right]
+      
+      if(target == 0) {
+        # Do not extract the VWLE if a specific component is absent from the corresponding equation
+        return(NULL)
+      } else {
+        vwleRows <- tibble::tibble(
+          lhs = left,
+          rhs = paste0(right, "VWLE"),
+          est = as.numeric(i),
+          model = "Interaction"
+        )
+        return(vwleRows)
+      }
+    }
+  )
+)
+
+# ---------------------------------- MULTIGROUP MODEL -------------------------------------
+
+
+multigroupStructural <- '
+  Physical ~ Reference + Psychopathy + Narcissism
+  Verbal ~ Reference + Psychopathy + Narcissism
+  Hostility ~ Reference + Psychopathy + Narcissism
+  Anger ~ Reference + Psychopathy + Narcissism
+  
+  Physical ~~ Verbal
+  Physical ~~ Hostility
+  Physical ~~ Anger
+  Verbal ~~ Hostility
+  Verbal ~~ Anger
+  Hostility ~~ Anger
+'
+
+multigroupFit <- sem(
+  model=multigroupStructural,
+  estimator="MLR",
+  meanstructure=TRUE,
+  group="Male",
+  data = FSDF
+)
+
+response <- c(
+  lavNames(multigroupFit, type = "ov.y"),
+  lavNames(multigroupFit, type = "lv.y")
+)
+
+g <- c("Reference")
+
+s <- list(c("Psychopathy", "Narcissism"))
+
+coefMatrix0 <- as.matrix(lavInspect(multigroupFit, "est")$`0`$beta)[response, ] #Ensure order
+coefMatrix1 <- as.matrix(lavInspect(multigroupFit, "est")$`1`$beta)[response, ] #Ensure order
+
+order <- colnames(coefMatrix0)
+
+covMatrix0 <- as.matrix(lavInspect(multigroupFit, "cov.all")$`0`)
+covMatrix0 <- covMatrix0[order, order, drop=FALSE]
+
+covMatrix1 <- as.matrix(lavInspect(multigroupFit, "cov.all")$`1`)
+covMatrix1 <- covMatrix1[order, order, drop=FALSE]
+
+vwleResult0 <- vwleFun(
+  response=response, 
+  g=g, 
+  s=s, 
+  covariates=NULL, 
+  lambdaMatrix=lambdaMatrix,
+  covMatrix=covMatrix0,
+  coefMatrix=coefMatrix0
+)
+
+vwleResult1 <- vwleFun(
+  response=response, 
+  g=g, 
+  s=s, 
+  covariates=NULL, 
+  lambdaMatrix=lambdaMatrix,
+  covMatrix=covMatrix1,
+  coefMatrix=coefMatrix1
+)
+
+vwleList0 <- lapply(
+  seq_len(nrow(vwleResult0$lvl)), 
+  function(i) {
+    out <- lapply(
+      seq_len(ncol(vwleResult0$lvl)), 
+      function(j){
+        return(vwleResult0$lvl[i,j, drop=FALSE])
+      }
+    )
+    return(out)
+  }
+)
+
+vwleList0 <- unlist(vwleList0, recursive=FALSE)
+
+vwleList1 <- lapply(
+  seq_len(nrow(vwleResult1$lvl)), 
+  function(i) {
+    out <- lapply(
+      seq_len(ncol(vwleResult1$lvl)), 
+      function(j){
+        return(vwleResult1$lvl[i,j, drop=FALSE])
+      }
+    )
+    return(out)
+  }
+)
+
+vwleList1 <- unlist(vwleList1, recursive=FALSE)
+
+vwleRows0 <- do.call(
+  rbind,
+  lapply(
+    vwleList0,
+    function(i) {
+      left <- rownames(i)
+      right <- colnames(i)
+      
+      target <- coefMatrix0[left, right]
+      
+      if(target == 0) {
+        # Do not extract the VWLE if a specific component is absent from the corresponding equation
+        return(NULL)
+      } else {
+        vwleRows <- tibble::tibble(
+          lhs = left,
+          rhs = paste0(right, "VWLE"),
+          group = "0",
+          est = as.numeric(i),
+          model="Multigroup"
+        )
+        return(vwleRows)
+      }
+    }
+  )
+)
+
+vwleRows1 <- do.call(
+  rbind,
+  lapply(
+    vwleList1,
+    function(i) {
+      left <- rownames(i)
+      right <- colnames(i)
+      
+      target <- coefMatrix1[left, right]
+      
+      if(target == 0) {
+        # Do not extract the VWLE if a specific component is absent from the corresponding equation
+        return(NULL)
+      } else {
+        vwleRows <- tibble::tibble(
+          lhs = left,
+          rhs = paste0(right, "VWLE"),
+          group = "1",
+          est = as.numeric(i),
+          model="Multigroup"
+        )
+        return(vwleRows)
+      }
+    }
+  )
+)
+
+vwleRowsDif <- dplyr::bind_rows(vwleRows0, vwleRows1) %>%
+  pivot_wider(
+    names_from = "group",
+    values_from = "est"
+  ) %>%
   mutate(
-    across(c(Estimate, SE, Z, P), \(x) round(x, digits = 4))
+    est = `1` - `0`,
+    rhs = paste0(gsub("VWLE", "", rhs), ":MaleVWLE")
+  ) %>%
+  dplyr::select(lhs, rhs, est, model)
+  
+
+# ----------------------------- COMPARISON TABLE -------------------------------------
+
+comparisonTable <- bind_rows(
+  vwleRowsInteraction,
+  vwleRows0,
+  vwleRowsDif
+) %>%
+  mutate(
+    rhs = gsub("VWLE", "", rhs)
+  ) %>%
+  dplyr::select(-group)
+
+comparisonTable %>%
+  pivot_wider(
+    id_cols = c(lhs, rhs),
+    names_from = "model",
+    values_from = "est"
   )
 ```
 
-#### Scalar
+#### HTML
+
+```{r}
+
+outcomeLevels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+outcomeLabels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+termLevels <- c(
+  "Psychopathy",
+  "Psychopathy:Male",
+  "Narcissism",
+  "Narcissism:Male"
+)
+
+termLabels <- c(
+  "Psychopathy",
+  "Psychopathy × Male",
+  "Narcissism",
+  "Narcissism × Male"
+)
+
+modelLevels <- c("Interaction", "Multigroup")
+modelLabels <- c("Interaction", "Multigroup")
+
+multigroupTable <- comparisonTable %>%
+  mutate(
+    Estimate = sprintf("%.3f", est),
+    Outcome = factor(
+      lhs,
+      levels = outcomeLevels,
+      labels = outcomeLabels
+    ),
+    Model = factor(
+      model,
+      levels = modelLevels,
+      labels = modelLabels
+    ),
+    Term = factor(
+      rhs, 
+      levels = termLevels,
+      labels = termLabels
+    )
+  ) %>%
+  dplyr::select(
+    Outcome,
+    Term,
+    Model,
+    Estimate
+  )
+
+multigroupTable <- multigroupTable %>%
+  tidyr::pivot_wider(
+    id_cols = Term,
+    names_from = c(Outcome, Model),
+    values_from = Estimate,
+    names_sep = "_",
+    names_expand = TRUE
+  ) %>%
+  arrange(Term)
+
+
+multigroupGT <- multigroupTable %>%
+  gt::gt(
+    rowname_col = "Term"
+  ) %>%
+  gt::tab_spanner(
+    label = "Physical",
+    columns = starts_with("Physical_")
+  ) %>%
+  gt::tab_spanner(
+    label = "Verbal",
+    columns = starts_with("Verbal_")
+  ) %>%
+  gt::tab_spanner(
+    label = "Hostility",
+    columns = starts_with("Hostility_")
+  ) %>%
+  gt::tab_spanner(
+    label = "Anger",
+    columns = starts_with("Anger_")
+  ) %>%
+  gt::cols_label(
+    ends_with("Interaction") ~ "Inter",
+    ends_with("Multigroup") ~ "Multi"
+  ) %>%
+  gt::fmt_markdown(
+    columns = -Term
+  ) %>%
+  gt::cols_align(
+    align = "center",
+    columns = -Term
+  ) %>%
+  gt::sub_missing(
+    columns = -Term,
+    missing_text = "—"
+  ) %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(
+      groups = everything()
+    )
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+multigroupGT
+
+if(export) {
+  multigroupGT_png <- multigroupGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    multigroupGT_png,
+    filename = "../Tables/multigroupTable.png",
+    zoom = 3.125,
+    expand = 0
+  )
+}
+```
+
+#### LaTeX
+
+```{r}
+
+if(export) {
+  # Convert one HTML-formatted result cell to LaTeX
+  toLatexCell <- function(x) {
+    if (is.na(x)) {
+      return("\\textemdash{}")
+    }
+    
+    x <- gsub("&lt;", "$<$", x, fixed = TRUE)
+    
+    # Replace each complete star sequence exactly once
+    x <- gsub(
+      "(\\*{1,3})",
+      "{\\\\tiny \\1}",
+      x,
+      perl = TRUE
+    )
+    
+    lines <- strsplit(x, "<br>", fixed = TRUE)[[1]]
+    
+    paste0(
+      "\\makecell{",
+      paste(lines, collapse = " \\\\ "),
+      "}"
+    )
+  }
+  
+  multigroupTableLatex <- multigroupTable %>%
+    mutate(
+      Term = as.character(Term),
+      Term = recode(
+        Term,
+        "Psychopathy × Male" = "Psychopathy $\\times$ Male",
+        "Narcissism × Male" = "Narcissism $\\times$ Male"
+      )
+    ) %>%
+    mutate(
+      across(
+        -c(Term),
+        \(x) vapply(x, toLatexCell, character(1))
+      )
+    )
+  
+  multigroupKable <- multigroupTableLatex %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", 8)),
+      col.names = c("", rep(c("Pool", "Multi"), 4))
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(multigroupTableLatex) - 1),
+      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::add_header_above(
+      c(
+        " " = 1,
+        "Physical" = 2,
+        "Verbal" = 2,
+        "Hostility" = 2,
+        "Anger" = 2
+      ),
+      escape = FALSE,
+      bold = TRUE
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(multigroupKable),
+    "../Tables/multigroupTable.tex"
+  )
+}
+```
+
+### Scalar invariance sensitivity
 
 ```{r}
 
@@ -7493,9 +7948,7 @@ scalarStructuralFit %>%
   )
 ```
 
-#### Invariance sensititvity table
-
-##### HTML
+#### HTML
 
 ```{r}
 
@@ -7539,13 +7992,13 @@ termLabels <- c(
   "N"
 )
 
-modelLevels <- c("metric", "scalar")
-modelLabels <- c("Metric", "Scalar")
+modelLevels <- c("partial", "scalar")
+modelLabels <- c("partial", "Scalar")
 
-metricStructuralFit$model <- "metric"
+saturatedFit$model <- "partial"
 scalarStructuralFit$model <- "scalar"
 
-invarianceSensitivityTable <- dplyr::bind_rows(metricStructuralFit, scalarStructuralFit) %>%
+invarianceSensitivityTable <- dplyr::bind_rows(saturatedFit, scalarStructuralFit) %>%
   filter(op %in% c("~", "gof") | (lhs %in% outcomeLevels & op == "~1")) %>%
   filter(!endsWith(rhs, "VWLE")) %>%
   mutate(
@@ -7632,7 +8085,7 @@ invarianceSensitivityGT <- invarianceSensitivityTable %>%
     columns = starts_with("Anger")
   ) %>%
   gt::cols_label(
-    ends_with("Metric") ~ "Metric",
+    ends_with("Partial") ~ "Partial",
     ends_with("Scalar") ~ "Scalar"
   ) %>%
   gt::fmt_markdown(
@@ -7678,7 +8131,7 @@ if(export) {
 }
 ```
 
-##### LaTeX
+#### LaTeX
 
 ```{r}
 
@@ -7749,7 +8202,7 @@ if(export) {
       booktabs = TRUE,
       escape = FALSE,
       align = c("l", rep("c", 8)),
-      col.names = c("Structural", rep(c("Metric", "Scalar"), 4))
+      col.names = c("Structural", rep(c("Partial", "Scalar"), 4))
     ) %>%
     kableExtra::row_spec(
       row = seq_len(nrow(invarianceSensitivityLatex) - 1),
