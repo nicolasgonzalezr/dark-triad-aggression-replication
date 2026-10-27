@@ -4,7 +4,7 @@ format: html
 editor: visual
 ---
 
-# Sex differences in the Dark Triad and trait aggression: A variance-weighted interpretation of the bifactor model
+# Sex differences in the relationship between the Dark Triad and trait aggression: A variance-weighted interpretation of the bifactor model
 
 ## Notes on replication package
 
@@ -26,7 +26,7 @@ parallelSupported  <- TRUE
 availableCores     <- 15    # Number of parallel workers
 B                  <- 9999  # Bootstrap resamples
 M                  <- 500   # Multiple imputation draws
-MB                 <- 20    # Multiple imputations draws inside each bootstrap resample
+MB                 <- 25    # Multiple imputations draws inside each bootstrap resample
 restartBootstraps  <- FALSE # Delete stored results and regenerate bootstrap matrices
 runRegularization  <- FALSE # Run regularized CFA instead of using stored results
 export             <- TRUE  # Export tables and figures
@@ -737,6 +737,300 @@ summary(bifactorFit, fit.measures = TRUE, standardized = TRUE)
 
 #### Invariance
 
+##### Cross-validation fun
+
+```{r}
+
+crossValidation <- function(measurementList, lambdas, regularizedPars, transformation, folds=10) {
+  
+  foldList <- split(sample(1:nrow(replicationData)), seq_len(folds))
+  
+  if (parallelSupported) {
+    cv <- pbmcapply::pbmclapply(
+      seq_along(foldList),
+      mc.cores = if(folds < availableCores) folds else availableCores,
+      mc.set.seed = TRUE,
+      function(f) {
+        
+        # Give this fold its own fresh compilation cache
+        workerCache <- tempfile(
+          pattern = paste0("rcpp-cv-", Sys.getpid(), "-", f, "-")
+        )
+        
+        dir.create(workerCache, recursive = TRUE)
+        
+        previousOptions <- options(rcpp.cache.dir = workerCache)
+        on.exit(options(previousOptions), add = TRUE)
+        
+        trainData <- replicationData[-foldList[[f]], ]
+        
+        trainGroup0 <- cfa(
+          measurementList[[1]],
+          estimator = "MLR",
+          meanstructure = TRUE,
+          std.lv = TRUE,
+          data = trainData[trainData$Male == 0, ]
+        )
+        
+        trainGroup1 <- cfa(
+          measurementList[[2]],
+          estimator = "MLR",
+          meanstructure = TRUE,
+          std.lv = FALSE,
+          auto.fix.first = FALSE,
+          do.fit = FALSE,
+          data = trainData[trainData$Male == 1, ]
+        )
+        
+        lassoFit <- lessSEM::lasso(
+          lavaanModel = list(trainGroup0, trainGroup1),
+          regularized = regularizedPars,
+          lambdas = lambdas,
+          modifyModel = lessSEM::modifyModel(
+            transformations = transformation
+          )
+        )
+        
+        # Held-out observations for this fold
+        testData <- replicationData[foldList[[f]], , drop = FALSE]
+        
+        # Initialize test models without estimating parameters
+        testGroup0 <- cfa(
+          measurementList[[1]],
+          estimator = "MLR",
+          meanstructure = TRUE,
+          std.lv = TRUE,
+          sample.icov = FALSE,
+          do.fit = FALSE,
+          data = testData[testData$Male == 0, ]
+        )
+        
+        testGroup1 <- cfa(
+          measurementList[[2]],
+          estimator = "MLR",
+          meanstructure = TRUE,
+          std.lv = FALSE,
+          auto.fix.first = FALSE,
+          sample.icov = FALSE,
+          do.fit = FALSE,
+          data = testData[testData$Male == 1, ]
+        )
+        
+        # Construct the joint test model once per fold
+        testSEM <- lessSEM:::.multiGroupSEMFromLavaan(
+          lavaanModels = list(testGroup0, testGroup1),
+          whichPars = "start",
+          fit = FALSE,
+          transformations = transformation
+        )
+        
+        # Identify free variances; covariances are excluded
+        pt <- dplyr::bind_rows(
+          lavaan::parTable(trainGroup0),
+          lavaan::parTable(trainGroup1)
+        )
+        
+        varianceLabels <- unique(
+          pt$label[
+            pt$free > 0 &
+              pt$op == "~~" &
+              pt$lhs == pt$rhs
+          ]
+        )
+        
+        # Evaluate one training solution per lambda
+        loss <- vapply(
+          seq_len(nrow(lassoFit@parameters)),
+          function(i) {
+            
+            # Extract training estimates for this lambda
+            trainPars <- unlist(
+              lassoFit@parameters[
+                i,
+                lassoFit@parameterLabels,
+                drop = FALSE
+              ],
+              use.names = TRUE
+            )
+            
+            # Convert variances to the backend's log-variance scale
+            rawPars <- trainPars
+            variancePars <- intersect(varianceLabels, names(rawPars))
+            rawPars[variancePars] <- log(rawPars[variancePars])
+            
+            # Insert training estimates and recompute transformations
+            testSEM <- lessSEM:::.setParameters(
+              SEM = testSEM,
+              labels = names(rawPars),
+              values = rawPars,
+              raw = TRUE
+            )
+            
+            # The ONLY likelihood evaluation for this lambda
+            testSEM$fit()
+          },
+          numeric(1)
+        )
+        
+        # Return the fold's results
+        data.frame(
+          lambda = lassoFit@parameters$lambda,
+          loss = loss,
+          converged = lassoFit@fits$convergence
+        )
+        
+      }
+    )
+  } else {
+    cv <- lapply(
+      seq_along(foldList),
+      function(f) {
+        
+        trainData <- replicationData[-foldList[[f]], ]
+        
+        trainGroup0 <- cfa(
+          measurementList[[1]],
+          estimator = "MLR",
+          meanstructure = TRUE,
+          std.lv = TRUE,
+          data = trainData[trainData$Male == 0, ]
+        )
+        
+        trainGroup1 <- cfa(
+          measurementList[[2]],
+          estimator = "MLR",
+          meanstructure = TRUE,
+          std.lv = FALSE,
+          auto.fix.first = FALSE,
+          do.fit = FALSE,
+          data = trainData[trainData$Male == 1, ]
+        )
+        
+        lassoFit <- lessSEM::lasso(
+          lavaanModel = list(trainGroup0, trainGroup1),
+          regularized = regularizedPars,
+          lambdas = lambdas,
+          modifyModel = lessSEM::modifyModel(
+            transformations = transformation
+          )
+        )
+        
+        # Held-out observations for this fold
+        testData <- replicationData[foldList[[f]], , drop = FALSE]
+        
+        # Initialize test models without estimating parameters
+        testGroup0 <- cfa(
+          measurementList[[1]],
+          estimator = "MLR",
+          meanstructure = TRUE,
+          std.lv = TRUE,
+          sample.icov = FALSE,
+          do.fit = FALSE,
+          data = testData[testData$Male == 0, ]
+        )
+        
+        testGroup1 <- cfa(
+          measurementList[[2]],
+          estimator = "MLR",
+          meanstructure = TRUE,
+          std.lv = FALSE,
+          auto.fix.first = FALSE,
+          sample.icov = FALSE,
+          do.fit = FALSE,
+          data = testData[testData$Male == 1, ]
+        )
+        
+        # Construct the joint test model once per fold
+        testSEM <- lessSEM:::.multiGroupSEMFromLavaan(
+          lavaanModels = list(testGroup0, testGroup1),
+          whichPars = "start",
+          fit = FALSE,
+          transformations = transformation
+        )
+        
+        # Identify free variances; covariances are excluded
+        pt <- dplyr::bind_rows(
+          lavaan::parTable(trainGroup0),
+          lavaan::parTable(trainGroup1)
+        )
+        
+        varianceLabels <- unique(
+          pt$label[
+            pt$free > 0 &
+              pt$op == "~~" &
+              pt$lhs == pt$rhs
+          ]
+        )
+        
+        # Evaluate one training solution per lambda
+        loss <- vapply(
+          seq_len(nrow(lassoFit@parameters)),
+          function(i) {
+            
+            # Extract training estimates for this lambda
+            trainPars <- unlist(
+              lassoFit@parameters[
+                i,
+                lassoFit@parameterLabels,
+                drop = FALSE
+              ],
+              use.names = TRUE
+            )
+            
+            # Convert variances to the backend's log-variance scale
+            rawPars <- trainPars
+            variancePars <- intersect(varianceLabels, names(rawPars))
+            rawPars[variancePars] <- log(rawPars[variancePars])
+            
+            # Insert training estimates and recompute transformations
+            testSEM <- lessSEM:::.setParameters(
+              SEM = testSEM,
+              labels = names(rawPars),
+              values = rawPars,
+              raw = TRUE
+            )
+            
+            # The ONLY likelihood evaluation for this lambda
+            testSEM$fit()
+          },
+          numeric(1)
+        )
+        
+        # Return the fold's results
+        data.frame(
+          lambda = lassoFit@parameters$lambda,
+          loss = loss,
+          converged = lassoFit@fits$convergence
+        )
+        
+      }
+    )
+  }
+  
+  failed <- vapply(cv, inherits, logical(1), what = "try-error")
+  
+  if (any(failed)) {
+    stop(as.character(cv[[which(failed)[1]]]), call. = FALSE)
+  }
+  
+  foldLoss <- dplyr::bind_rows(cv, .id = "fold")
+
+  cvLoss <- foldLoss %>%
+    dplyr::group_by(lambda) %>%
+    dplyr::summarise(
+      loss = sum(loss),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(loss)
+  
+  list(
+    bestLambda = cvLoss$lambda[1],
+    cvLoss = cvLoss,
+    foldLoss = foldLoss
+  )
+}
+```
+
 ##### Regularized BPAQ
 
 ```{r}
@@ -744,6 +1038,17 @@ summary(bifactorFit, fit.measures = TRUE, standardized = TRUE)
 if(runRegularization) {
   
   set.seed(masterSeed)
+  
+  lambdaMaxBPAQ <- 0.4779021 # 0.47 is the maximum, regularizes all differences to 0
+  
+  lambdasBPAQ <- c(
+    exp(seq(
+      log(lambdaMaxBPAQ),
+      log(lambdaMaxBPAQ * 1e-3),
+      length.out = 50
+    )),
+    0
+  )
   
   itemsBPAQ <- c(physicalItems, verbalItems, hostilityItems, angerItems)
   
@@ -878,15 +1183,20 @@ if(runRegularization) {
     )
   )
   
-  tauDif <- 0.20
-  nObs <- nobs(singleGroupFemaleBPAQ) + nobs(singleGroupMaleBPAQ)
+  cv <- crossValidation(
+    measurementList = list(responseMeasurementFemale, responseMeasurementMale),
+    lambdas = lambdasBPAQ,
+    regularizedPars = interceptsDelta,
+    transformation = transformation,
+    folds = 10
+  )
   
-  lambda <- 1 / (nObs * tauDif^2)
+  bestLambda <- cv[["bestLambda"]]
   
   lassoFitBPAQ <- lessSEM::lasso(
     lavaanModel = c(singleGroupFemaleBPAQ, singleGroupMaleBPAQ),
     regularized = interceptsDelta,
-    lambdas = lambda,
+    lambdas = bestLambda,
     modifyModel = lessSEM::modifyModel(
       transformations = transformation
     )
@@ -983,6 +1293,17 @@ if(runRegularization) {
 if(runRegularization) {
 
   set.seed(masterSeed)
+
+  lambdaMaxSD3 <- 0.1763140 # 0.17 is the maximum, regularizes all differences to 0
+  
+  lambdasSD3 <- c(
+    exp(seq(
+      log(lambdaMaxSD3),
+      log(lambdaMaxSD3 * 1e-3),
+      length.out = 50
+    )),
+    0
+  )
   
   interceptsFemale <- paste0(
     coreItems, "_SEP_Int_SEP_none_SEP_Female"
@@ -1100,15 +1421,20 @@ if(runRegularization) {
     )
   )
   
-  tauDif <- 0.20
-  nObs <- nobs(singleGroupFemaleSD3) + nobs(singleGroupMaleSD3)
+  cv <- crossValidation(
+    measurementList = list(bifactorMeasurementFemale, bifactorMeasurementMale),
+    lambdas = lambdasSD3,
+    regularizedPars = interceptsDelta,
+    transformation = transformation,
+    folds = 10
+  )
   
-  lambda <- 1 / (nObs * tauDif^2)
+  bestLambda <- cv[["bestLambda"]]
   
   lassoFitSD3 <- lessSEM::lasso(
     lavaanModel = c(singleGroupFemaleSD3, singleGroupMaleSD3),
     regularized = interceptsDelta,
-    lambdas = lambda,
+    lambda = bestLambda,
     modifyModel = lessSEM::modifyModel(
       transformations = transformation
     )
@@ -1200,15 +1526,134 @@ if(runRegularization) {
 
 ##### Invariance statistics
 
+Determine the number of items to free
+
 ```{r}
 
 set.seed(masterSeed)
 
 interceptsSD3 <- readRDS(file = "../Data/interceptsSD3.rds")
 interceptsBPAQ <- readRDS(file = "../Data/interceptsBPAQ.rds")
+thresholdSD3 <- qnorm(0.025, lower.tail = FALSE)
+thresholdBPAQ <- qnorm(0.025, lower.tail = FALSE)
 
-nFreeBPAQ <- 9
-nFreeSD3 <- 6
+if (parallelSupported) {
+  minMaxList <- pbmcapply::pbmclapply(
+    1:12,
+    mc.cores = if(12 < availableCores) 12 else availableCores,
+    mc.set.seed = TRUE,
+    function(nFree) {
+      
+      freeSD3 <- interceptsSD3$lhs[1:nFree]
+      
+      interceptSyntaxSD3 <- paste(
+        paste0(
+          freeSD3, " ~ c(",
+          freeSD3, "_0, ", freeSD3, "_1)*1"
+        ),
+        collapse = "\n"
+      )
+      
+      testSD3 <- paste(
+        paste0(
+          freeSD3, "_delta := ",
+          freeSD3, "_1 - ", freeSD3, "_0"
+        ),
+        collapse = "\n"
+      )
+      
+      partialInvarianceFitSD3 <- cfa(
+        paste(bifactorMeasurement, interceptSyntaxSD3, testSD3, sep = "\n"),
+        estimator = "MLR",
+        meanstructure = TRUE,
+        group = "Male",
+        group.label = c("0", "1"),
+        group.equal = c("loadings", "intercepts"),
+        group.partial = paste0(freeSD3, " ~ 1"),
+        std.lv = TRUE,
+        data = replicationData
+      )
+      
+
+      minMaxSD3 <- parameterEstimates(partialInvarianceFitSD3) %>%
+        filter(
+          op == ":=",
+        ) %>%
+        mutate(
+          lhs = sub("_delta", "", lhs)
+        ) %>%
+        summarise(
+          minMax = min(abs(z))
+        ) %>%
+        pull(minMax)
+        
+        
+      freeBPAQ <- interceptsBPAQ$lhs[1:nFree]
+      
+      interceptSyntaxBPAQ <- paste(
+        paste0(
+          freeBPAQ, " ~ c(",
+          freeBPAQ, "_0, ", freeBPAQ, "_1)*1"
+        ),
+        collapse = "\n"
+      )
+      
+      testBPAQ <- paste(
+        paste0(
+          freeBPAQ, "_delta := ",
+          freeBPAQ, "_1 - ", freeBPAQ, "_0"
+        ),
+        collapse = "\n"
+      )
+      
+      partialInvarianceFitBPAQ <- cfa(
+        paste(responseMeasurement, interceptSyntaxBPAQ, testBPAQ, sep = "\n"),
+        estimator = "MLR",
+        meanstructure = TRUE,
+        group = "Male",
+        group.label = c("0", "1"),
+        group.equal = c("loadings", "intercepts"),
+        group.partial = paste0(freeBPAQ, " ~ 1"),
+        std.lv = TRUE,
+        data = replicationData
+      )
+      
+      minMaxBPAQ <- parameterEstimates(partialInvarianceFitBPAQ) %>%
+        filter(
+          op == ":=",
+        ) %>%
+        mutate(
+          lhs = sub("_delta", "", lhs)
+        ) %>%
+        summarise(
+          minMax = min(abs(z))
+        ) %>%
+        pull(minMax)
+      
+      data.frame(nFree = nFree, minMaxSD3 = minMaxSD3, minMaxBPAQ = minMaxBPAQ)
+    }
+  )
+}
+
+minMaxDf <- do.call(
+  dplyr::bind_rows,
+  minMaxList
+)
+
+minMaxDf
+
+nFreeSD3 <- which(minMaxDf$minMaxSD3 < thresholdSD3)[1] - 1
+nFreeBPAQ <- which(minMaxDf$minMaxBPAQ < thresholdBPAQ)[1] -1
+
+nFreeSD3
+nFreeBPAQ
+```
+
+Fit models
+
+```{r}
+
+set.seed(masterSeed)
 
 # ---------------------------------- SD3 -------------------------------------
 
@@ -1426,16 +1871,6 @@ table(interceptsBPAQ$factor)
 ##### Congenial models
 
 ```{r}
-
-congenialMetricFit <- congenialFun(
-  measurementFit=list(metricInvarianceFitBPAQ, metricInvarianceFitSD3), 
-  covariates=c(
-    "Age"
-  ),
-  group="Male",
-  groupLabels = c("0", "1"),
-  data=replicationData
-)
 
 congenialScalarFit <- congenialFun(
   measurementFit=list(scalarInvarianceFitBPAQ, scalarInvarianceFitSD3), 
@@ -2179,8 +2614,6 @@ if(export) {
       )
     )
   
-  tableNotes <- r"(Entries are standardized residual covariances (i.e., partial correlations) from the bifactor ($\\mathrm{S}-1$) measurement model under alternative reference facets, with standard errors in parentheses. Mach = Machiavellianism; Psych = Psychopathy; Narc = Narcissism. The factor following the vertical bar corresponds to the bifactor reference facet. Models were estimated by robust maximum likelihood. * p < .05; ** p < .01; *** p < .001.)"
-  
   covarianceKable <- covarianceTableLatex %>%
     knitr::kable(
       format = "latex",
@@ -2501,6 +2934,7 @@ vwleFun <- function(response, g, s, covariates, lambdaMatrix, covMatrix, coefMat
   
   lambda_x_xi <- lambdaMatrix[, gBase, drop = FALSE]
   
+  # Least-squares identifying convention
   lambda_xi <- solve(t(lambda_x) %*% lambda_x) %*% t(lambda_x) %*% lambda_x_xi
 
   # Match second order loadings to corresponding columns in the phi_s matrix. We assume the latent manifest interactions have the same loading that the latent variable alone, on the grounds of no cross products: 
@@ -2572,13 +3006,10 @@ vwleFun <- function(response, g, s, covariates, lambdaMatrix, covMatrix, coefMat
   
   # ----------------- ESTIMATOR -----------------------
 
-  cov_eta_xi <- 
-    gamma_g %*% (phi_g %*% t(lambda_xi) + phi_gs) +
-    gamma_s %*% (t(phi_gs) %*% t(lambda_xi) + phi_s)
+  cov_g_xi <- phi_g %*% t(lambda_xi) + phi_gs
+  cov_s_xi <- t(phi_gs) %*% t(lambda_xi) + phi_s
   
   phi <- covMatrix[rownames(covMatrix) %in% c(g, unlist(s), covariates), colnames(covMatrix) %in% c(g, unlist(s), covariates), drop = FALSE]
-  
-  cov_eta_reduced <- gamma %*% phi
   
   vwle <- do.call(
     cbind,
@@ -2600,31 +3031,43 @@ vwleFun <- function(response, g, s, covariates, lambdaMatrix, covMatrix, coefMat
             seq_len(nrow(gamma)),
             function(r) {
               
+              # Oblique conditioning set
               minj <-
                 !(colnames(phi) %in% c(g_i, s_j)) &
                 gamma[r, colnames(phi)] != 0
               
-              cov_j <- cov_eta_xi[r, s_j, drop = FALSE]
               
+              cov_g_j <- cov_g_xi[g_i, s_j, drop = FALSE]
+              cov_s_j <- cov_s_xi[s_j, s_j, drop = FALSE]
               var_j <- phi_1[s_j, s_j, drop = FALSE]
               
-              if (!any(minj)) {
-                return(cov_j %*% solve(var_j))
+              if (any(minj)) {
+                var_minj <- phi[minj, minj, drop = FALSE]
+                prec_minj <- solve(var_minj)
+                
+                cov_j_minj <-
+                  lambda_xi[s_j, g_i, drop = FALSE] %*%
+                  phi[g_i, minj, drop = FALSE] +
+                  phi[s_j, minj, drop = FALSE]
+                
+                adjustment <- prec_minj %*% t(cov_j_minj)
+                
+                cov_g_j <- cov_g_j -
+                  phi[g_i, minj, drop = FALSE] %*% adjustment
+                
+                cov_s_j <- cov_s_j -
+                  phi[s_j, minj, drop = FALSE] %*% adjustment
+                
+                var_j <- var_j - cov_j_minj %*% adjustment
               }
               
-              cov_minj <- cov_eta_reduced[r, minj, drop = FALSE]
+              prec_j <- solve(var_j)
+              weight_g <- cov_g_j %*% prec_j
+              weight_s <- cov_s_j %*% prec_j
               
-              var_minj <- phi[minj, minj, drop = FALSE]
+              gamma_g[r, g_i, drop = FALSE] %*% weight_g +
+                gamma_s[r, s_j, drop = FALSE] %*% weight_s
               
-              prec_minj <- solve(var_minj)
-              
-              cov_j_minj <-
-                phi[s_j, minj, drop = FALSE] +
-                lambda_xi[s_j, g_i, drop = FALSE] %*%
-                phi[g_i, minj, drop = FALSE]
-              
-              (cov_j - cov_minj %*% prec_minj %*% t(cov_j_minj)) %*%
-                solve(var_j - cov_j_minj %*% prec_minj %*% t(cov_j_minj))
             }
           )
         )
@@ -2993,7 +3436,7 @@ bootFun <- function(draw, mDraws, structuralModel, measurementModel, fullMeasure
   )
   
   if (!all(sapply(measurementFit, checkConvergence)) || !all(sapply(measurementFit, checkPD))) return(NULL)
-
+  
   # ------------------- CONGENIAL START ---------------------------
   
   congenialFit <- congenialFun(
@@ -3028,7 +3471,7 @@ bootFun <- function(draw, mDraws, structuralModel, measurementModel, fullMeasure
   estimates <- Filter(Negate(is.null), estimates)
   if (length(estimates) == 0L) return(NULL)
   
-  estimates <- estimates <- dplyr::bind_rows(
+  estimates <- dplyr::bind_rows(
     lapply(estimates, function(x) x[["estimates"]])
   ) %>%
     filter(
@@ -3055,17 +3498,17 @@ bootFun <- function(draw, mDraws, structuralModel, measurementModel, fullMeasure
     # Pool
     group_by(lhs, op, rhs) %>%
     summarise(
-      M = n(),
+      Mboot = n(),
       estBoot = mean(est),
-      WithinVar = mean(se^2),
-      BetweenVar = var(est),
+      wVarBoot = mean(se^2),
+      bVarBoot = var(est),
       .groups = "drop"
     ) %>%
     mutate(
-      TotalVar = WithinVar + (1 + 1/M) * BetweenVar, # Rubin MI total variance
+      TotalVar = wVarBoot + (1 + 1/Mboot) * bVarBoot, # Rubin MI total variance
       seBoot = sqrt(TotalVar)
     ) %>%
-    dplyr::select(lhs, op, rhs, estBoot, seBoot)
+    dplyr::select(lhs, op, rhs, estBoot, seBoot, wVarBoot, bVarBoot, Mboot)
   
   estimates <- dplyr::bind_rows(
     estimates,
@@ -3079,7 +3522,7 @@ bootFun <- function(draw, mDraws, structuralModel, measurementModel, fullMeasure
   )
   
   estimates$draw <- draw
-  
+
   return(estimates)
 }
 
@@ -3090,37 +3533,45 @@ processFunBoot <- function(fullFit, bootFit) {
   
   by <- join_by(lhs, op, rhs)
   
-  vwleBoot <- fullFit %>%
-    right_join(bootFit, by=by) %>%
-    filter(endsWith(rhs, "VWLE")) %>%
-    group_by(lhs, op, rhs) %>%
-    summarise(
-      M=first(M),
-      Estimate=first(Estimate),
-      WithinVar=first(WithinVar),
-      BetweenVar=first(BetweenVar),
-      TotalVar=first(TotalVar),
-      SE = sd(estBoot, na.rm=TRUE),
-      Z = Estimate / SE,
-      P = 2 * pnorm(abs(Z), lower.tail = FALSE),
-      pBoot = mean(
-        abs(estBoot - Estimate) >= abs(Estimate),
-        na.rm = TRUE
-      ),
-      meanBoot = mean(estBoot, na.rm=TRUE),
-      biasBoot = meanBoot - Estimate,
-      bootSuccess = n_distinct(draw),
-    ) %>%
-    ungroup()
-  
-  
+  if(any(endsWith(fullFit$rhs, "VWLE"))) {
+    vwleBoot <- fullFit %>%
+      right_join(bootFit, by=by) %>%
+      filter(endsWith(rhs, "VWLE")) %>%
+      group_by(lhs, op, rhs) %>%
+      summarise(
+        M=first(M),
+        Estimate=first(Estimate),
+        WithinVar=first(WithinVar),
+        BetweenVar=first(BetweenVar),
+        TotalVar=first(TotalVar),
+        SE = sd(estBoot, na.rm=TRUE),
+        Z = Estimate / SE,
+        P = 2 * pnorm(abs(Z), lower.tail = FALSE),
+        pBoot = mean(
+          abs(estBoot - Estimate) >= abs(Estimate),
+          na.rm = TRUE
+        ),
+        meanBoot = mean(estBoot, na.rm=TRUE),
+        seBoot = sd(estBoot, na.rm=TRUE),
+        biasBoot = meanBoot - Estimate,
+        mcVarBoot = mean(bVarBoot / Mboot, na.rm = TRUE),
+        mcErrBoot = sqrt(mcVarBoot),
+        mcShareBoot = mcVarBoot / seBoot^2,
+        minBootM = min(Mboot, na.rm = TRUE),
+        bootSuccess = n_distinct(draw)
+      ) %>%
+      ungroup() 
+  } else {
+    vwleBoot <- NULL
+  }
+
   structuralBoot <- fullFit %>%
     dplyr::select(lhs, op, rhs, Estimate, Z) %>%
     right_join(bootFit, by=by) %>%
-    filter(!endsWith(rhs, "VWLE"), op != "cosine") %>%
+    filter(!endsWith(rhs, "VWLE"), op %in% c("~", "~1", "~~")) %>%
     group_by(lhs, op, rhs) %>%
     mutate(
-      zBoot = (estBoot - Estimate) / seBoot,
+      zBoot = (estBoot - Estimate) / seBoot, # USES STORED RUBIN SE
     ) %>%
     summarise(
       pBoot = mean(
@@ -3128,8 +3579,13 @@ processFunBoot <- function(fullFit, bootFit) {
         na.rm = TRUE
       ),
       meanBoot = mean(estBoot, na.rm=TRUE),
+      seBoot = sd(estBoot, na.rm=TRUE), # OVERWRITES RUBIN SE WITH EMPIRICAL BOOT SE
       biasBoot = meanBoot - first(Estimate),
-      bootSuccess = n_distinct(draw),
+      mcVarBoot = mean(bVarBoot / Mboot, na.rm = TRUE),
+      mcErrBoot = sqrt(mcVarBoot),
+      mcShareBoot = mcVarBoot / seBoot^2,
+      minBootM = min(Mboot),
+      bootSuccess = n_distinct(draw)
     ) %>%
     ungroup()
   
@@ -3676,7 +4132,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = baselineModel, 
-        measurementModel = list(responseMeasurement, bifactorMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = bifactorMeasurement),
         fullMeasurement = congenialPartialFit,
         VWLE=TRUE,
         g=c("Reference"),
@@ -3697,7 +4153,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = baselineModel, 
-        measurementModel = list(responseMeasurement, bifactorMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = bifactorMeasurement),
         fullMeasurement = congenialPartialFit,
         VWLE=TRUE,
         g=c("Reference"),
@@ -3832,7 +4288,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = moderatedModel, 
-        measurementModel = list(responseMeasurement, bifactorMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = bifactorMeasurement),
         fullMeasurement = congenialPartialFit,
         VWLE=TRUE,
         g=c("Reference", "Reference:Male"),
@@ -3853,7 +4309,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = moderatedModel, 
-        measurementModel = list(responseMeasurement, bifactorMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = bifactorMeasurement),
         fullMeasurement = congenialPartialFit,
         VWLE=TRUE,
         g=c("Reference", "Reference:Male"),
@@ -4414,7 +4870,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = saturatedModel, 
-        measurementModel = list(responseMeasurement, bifactorMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = bifactorMeasurement),
         fullMeasurement = congenialPartialFit,
         VWLE=TRUE,
         g=c("Reference", "Reference:Male"),
@@ -4435,7 +4891,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = saturatedModel, 
-        measurementModel = list(responseMeasurement, bifactorMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = bifactorMeasurement),
         fullMeasurement = congenialPartialFit,
         VWLE=TRUE,
         g=c("Reference", "Reference:Male"),
@@ -4570,7 +5026,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = parsimoniousModel, 
-        measurementModel = list(responseMeasurement, bifactorMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = bifactorMeasurement),
         fullMeasurement = congenialPartialFit,
         VWLE=TRUE,
         g=c("Reference"),
@@ -4591,7 +5047,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = parsimoniousModel, 
-        measurementModel = list(responseMeasurement, bifactorMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = bifactorMeasurement),
         fullMeasurement = congenialPartialFit,
         VWLE=TRUE,
         g=c("Reference"),
@@ -6033,7 +6489,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = correlatedStructuralModel,
-        measurementModel = list(responseMeasurement, firstOrderMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = firstOrderMeasurement),
         fullMeasurement = congenialFirstOrderFit,
         VWLE=FALSE,
         g=NULL,
@@ -6054,7 +6510,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = correlatedStructuralModel,
-        measurementModel = list(responseMeasurement, firstOrderMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = firstOrderMeasurement),
         fullMeasurement = congenialFirstOrderFit,
         VWLE=FALSE,
         g=NULL,
@@ -6232,7 +6688,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = psychopathyStructural, 
-        measurementModel = list(responseMeasurement, psychopathyMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = psychopathyMeasurement),
         fullMeasurement = partialPsychopathyFit,
         VWLE=TRUE,
         g=c("Reference"),
@@ -6253,7 +6709,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = psychopathyStructural, 
-        measurementModel = list(responseMeasurement, psychopathyMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = psychopathyMeasurement),
         fullMeasurement = partialPsychopathyFit,
         VWLE=TRUE,
         g=c("Reference"),
@@ -6404,7 +6860,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = narcissismStructural, 
-        measurementModel = list(responseMeasurement, narcissismMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = narcissismMeasurement),
         fullMeasurement = partialNarcissismFit,
         congenialCovariates = NULL,
         VWLE=TRUE,
@@ -6426,7 +6882,7 @@ while (runBootstraps && !targetReached) {
         FUN = bootFun,
         mDraws = MB,
         structuralModel = narcissismStructural, 
-        measurementModel = list(responseMeasurement, narcissismMeasurement),
+        measurementModel = list(BPAQ = responseMeasurement, SD3 = narcissismMeasurement),
         fullMeasurement = partialNarcissismFit,
         congenialCovariates = NULL,
         VWLE=TRUE,
@@ -8245,4 +8701,2196 @@ if(export) {
     "../Tables/invarianceSensitivityTable.tex"
   )
 }
+```
+
+### Ordered item responses
+
+```{r}
+
+set.seed(masterSeed)
+
+# ---------------------------------- SD3 -------------------------------------
+
+nullMeasurement <- paste(
+  c(
+    paste(coreItems, "~ 0*1"),
+    paste0(coreItems, " ~~ 1*", coreItems)
+  ),
+  collapse = "\n"
+)
+
+nullFitSD3 <- cfa(
+  nullMeasurement,
+  estimator = "WLSMV",
+  ordered = TRUE,
+  parameterization = "theta",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("thresholds", "intercepts", "residuals"),
+  auto.cov.y = FALSE,
+  data = replicationData
+)
+
+configuralInvarianceFitSD3 <- cfa(
+  bifactorMeasurement,
+  estimator = "WLSMV",
+  ordered = TRUE,
+  parameterization = "theta",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  configuralInvarianceFitSD3,
+  fit.measures = c(
+    "cfi", "cfi.robust", "rmsea", "rmsea.robust", "srmr", "mfi"
+  ),
+  baseline.model = nullFitSD3
+)
+
+# ---------------------------------- BPAQ ------------------------------------
+
+itemsBPAQ <- c(
+  physicalItems, verbalItems, hostilityItems, angerItems
+)
+
+nullMeasurement <- paste(
+  c(
+    paste(itemsBPAQ, "~ 0*1"),
+    paste0(itemsBPAQ, " ~~ 1*", itemsBPAQ)
+  ),
+  collapse = "\n"
+)
+
+nullFitBPAQ <- cfa(
+  nullMeasurement,
+  estimator = "WLSMV",
+  ordered = TRUE,
+  parameterization = "theta",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("thresholds", "intercepts", "residuals"),
+  auto.cov.y = FALSE,
+  data = replicationData
+)
+
+configuralInvarianceFitBPAQ <- cfa(
+  responseMeasurement,
+  estimator = "WLSMV",
+  ordered = TRUE,
+  parameterization = "theta",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  configuralInvarianceFitBPAQ,
+  fit.measures = c(
+    "cfi", "cfi.robust", "rmsea", "rmsea.robust", "srmr", "mfi"
+  ),
+  baseline.model = nullFitBPAQ
+)
+```
+
+### Residual covariances robustness
+
+#### CV fun
+
+```{r}
+
+crossValidationRes <- function(
+    measurement,
+    lambdas,
+    regularizedPars,
+    items,
+    folds = 10,
+    data = replicationData
+) {
+  
+  stopifnot(
+    folds >= 2,
+    folds <= nrow(data),
+    all(items %in% names(data))
+  )
+  
+  foldList <- split(
+    sample(seq_len(nrow(data))),
+    rep(seq_len(folds), length.out = nrow(data))
+  )
+  
+  # Same worker for parallel and sequential execution
+  fitFold <- function(f) {
+    
+    trainData <- data[-foldList[[f]], , drop = FALSE]
+    testData  <- data[foldList[[f]], , drop = FALSE]
+    
+    # Standardize using training moments only
+    trainScaled <- scale(
+      trainData[, items, drop = FALSE]
+    )
+    
+    trainMeans <- attr(trainScaled, "scaled:center")
+    trainSDs   <- attr(trainScaled, "scaled:scale")
+    
+    if (any(!is.finite(trainSDs) | trainSDs <= 0)) {
+      stop("Invalid item SD in training fold ", f)
+    }
+    
+    testScaled <- lessSEM::cvScaler(
+      testSet = as.matrix(testData[, items, drop = FALSE]),
+      means = trainMeans,
+      standardDeviations = trainSDs
+    )
+    
+    trainData[items] <- as.data.frame(trainScaled)
+    testData[items]  <- as.data.frame(testScaled)
+    
+    # Initialize training model without fitting it in lavaan
+    trainModel <- lavaan::cfa(
+      measurement,
+      estimator = "MLR",
+      std.lv = TRUE,
+      meanstructure = TRUE,
+      do.fit = FALSE,
+      data = trainData
+    )
+    
+    # Fit the training lambda path
+    lassoFit <- lessSEM::lasso(
+      lavaanModel = trainModel,
+      regularized = regularizedPars,
+      lambdas = lambdas,
+      control = lessSEM::controlGlmnet(
+        nCores = 1
+      )
+    )
+    
+    # Initialize held-out model without fitting it
+    testModel <- lavaan::cfa(
+      measurement,
+      estimator = "MLR",
+      std.lv = TRUE,
+      meanstructure = TRUE,
+      sample.icov = FALSE,
+      do.fit = FALSE,
+      data = testData
+    )
+    
+    testSEM <- lessSEM:::.SEMFromLavaan(
+      lavaanModel = testModel,
+      whichPars = "start",
+      fit = FALSE
+    )
+    
+    # Evaluate training estimates on held-out observations
+    loss <- vapply(
+      seq_len(nrow(lassoFit@parameters)),
+      function(i) {
+        
+        trainPars <- unlist(
+          lassoFit@parameters[
+            i,
+            lassoFit@parameterLabels,
+            drop = FALSE
+          ],
+          use.names = TRUE
+        )
+        
+        testSEM <- lessSEM:::.setParameters(
+          SEM = testSEM,
+          labels = names(trainPars),
+          values = trainPars,
+          raw = FALSE
+        )
+        
+        # Likelihood evaluation only; no optimization
+        testSEM$fit()
+      },
+      numeric(1)
+    )
+    
+    data.frame(
+      lambda = lassoFit@parameters$lambda,
+      loss = loss,
+      converged = lassoFit@fits$convergence
+    )
+  }
+  
+  if (parallelSupported) {
+    
+    cv <- pbmcapply::pbmclapply(
+      seq_along(foldList),
+      FUN = fitFold,
+      mc.cores = min(folds, availableCores),
+      mc.set.seed = TRUE
+    )
+    
+  } else {
+    
+    cv <- lapply(
+      seq_along(foldList),
+      FUN = fitFold
+    )
+    
+  }
+  
+  failed <- vapply(
+    cv,
+    inherits,
+    logical(1),
+    what = "try-error"
+  )
+  
+  if (any(failed)) {
+    stop(
+      as.character(cv[[which(failed)[1]]]),
+      call. = FALSE
+    )
+  }
+  
+  foldLoss <- dplyr::bind_rows(cv, .id = "fold")
+  
+  cvLoss <- foldLoss %>%
+    dplyr::group_by(lambda) %>%
+    dplyr::summarise(
+      valid = all(converged %in% TRUE) &&
+        all(is.finite(loss)),
+      loss = sum(loss),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(loss)
+  
+  eligible <- cvLoss %>%
+    dplyr::filter(valid)
+  
+  bestLambda <- if (nrow(eligible) > 0) {
+    eligible$lambda[1]
+  } else {
+    NA_real_
+  }
+  
+  list(
+    bestLambda = bestLambda,
+    cvLoss = cvLoss,
+    foldLoss = foldLoss
+  )
+}
+
+```
+
+#### BPAQ
+
+```{r}
+
+if(runRegularization) {
+
+  set.seed(masterSeed)
+  
+  lambdaMaxBPAQ <- 0.6334506 # Regularizes all to zero
+  
+  lambdaMinBPAQ <- lambdaMaxBPAQ * 0.1
+  
+  lambdasBPAQ <- seq(
+    from = lambdaMaxBPAQ,
+    to = lambdaMinBPAQ,
+    length.out = 100
+  )
+  
+  itemsBPAQ <- c(physicalItems, verbalItems, hostilityItems, angerItems)
+  
+  regularizedBPAQ <- unlist(
+      sapply(
+      seq_len(length(itemsBPAQ) - 1L),
+      function(i) {
+        paste0(
+          "delta_",
+          "_SEP_",
+          itemsBPAQ[i],
+          "_SEP_",
+          itemsBPAQ[(i + 1L):length(itemsBPAQ)]
+        )
+      }
+    )
+  )
+  
+  residualCovariancesBPAQ <- paste0(
+    itemsBPAQ[-length(itemsBPAQ)], " ~~ ",
+    sapply(
+      seq_len(length(itemsBPAQ) - 1L),
+      function(i) {
+        paste(
+          paste0(
+            "delta_",
+            "_SEP_",
+            itemsBPAQ[i],
+            "_SEP_",
+            itemsBPAQ[(i + 1L):length(itemsBPAQ)],
+            "*",
+            itemsBPAQ[(i + 1L):length(itemsBPAQ)]
+          ),
+          collapse = " + "
+        )
+      }
+    ),
+    " \n "
+  )
+  
+  residualMeasurementBPAQ <- paste(
+    c(responseMeasurement, residualCovariancesBPAQ),
+    collapse = "\n"
+  )
+  
+  residualFitBPAQ <- cfa(
+    residualMeasurementBPAQ,
+    estimator = "MLR",
+    std.lv = TRUE,
+    meanstructure = TRUE,
+    do.fit = FALSE,
+    data = replicationData
+  )
+  
+  cvBPAQ <- crossValidationRes(
+    measurement = residualMeasurementBPAQ,
+    lambdas = lambdasBPAQ,
+    regularizedPars = regularizedBPAQ,
+    items = itemsBPAQ,
+    folds = 10
+  )
+  
+  lassoFitBPAQ <- lessSEM::lasso(
+    lavaanModel = residualFitBPAQ,
+    regularized = regularizedBPAQ,
+    lambdas = lambdasBPAQ,
+    control = lessSEM::controlGlmnet(
+      nCores = 1
+    )
+  )
+  
+  residualRankingBPAQ <- lassoFitBPAQ@parameters %>%
+    dplyr::select(
+      lambda,
+      dplyr::all_of(regularizedBPAQ)
+    ) %>%
+    filter(
+      lambda==cvBPAQ$bestLambda
+    ) %>%
+    tidyr::pivot_longer(
+      cols = -lambda,
+      names_to = "parameter",
+      values_to = "est"
+    ) %>%
+    dplyr::mutate(
+      magnitude = abs(est),
+      selected = est != 0
+    ) %>%
+    dplyr::group_by(lambda) %>%
+    dplyr::mutate(
+      rank = dplyr::min_rank(dplyr::desc(magnitude))
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(dplyr::desc(lambda), rank, parameter)
+  
+  residualRankingBPAQ <- residualRankingBPAQ %>%
+    tidyr::separate_wider_delim(
+      parameter,
+      delim = "_SEP_",
+      names = c("DROP", "lhs", "rhs")
+    ) %>%
+    select(-DROP)
+  
+  residualRankingBPAQ
+  
+  saveRDS(residualRankingBPAQ, file = "../Data/residualsBPAQ.rds")
+  
+}
+```
+
+#### SD3
+
+```{r}
+
+if (runRegularization) {
+  
+  set.seed(masterSeed)
+  
+  lambdaMaxSD3 <- 0.809702 # Regularizes all to zero
+  
+  lambdaMinSD3 <- lambdaMaxSD3 * 0.1
+  
+  lambdasSD3 <- seq(
+    from = lambdaMaxSD3,
+    to = lambdaMinSD3,
+    length.out = 100
+  )
+  
+  itemsSD3 <- c(coreItems)
+  
+  regularizedSD3 <- unlist(
+    sapply(
+      seq_len(length(itemsSD3) - 1L),
+      function(i) {
+        paste0(
+          "delta_",
+          "_SEP_",
+          itemsSD3[i],
+          "_SEP_",
+          itemsSD3[(i + 1L):length(itemsSD3)]
+        )
+      }
+    )
+  )
+  
+  residualCovariancesSD3 <- paste0(
+    itemsSD3[-length(itemsSD3)], " ~~ ",
+    sapply(
+      seq_len(length(itemsSD3) - 1L),
+      function(i) {
+        paste(
+          paste0(
+            "delta_",
+            "_SEP_",
+            itemsSD3[i],
+            "_SEP_",
+            itemsSD3[(i + 1L):length(itemsSD3)],
+            "*",
+            itemsSD3[(i + 1L):length(itemsSD3)]
+          ),
+          collapse = " + "
+        )
+      }
+    ),
+    " \n "
+  )
+  
+  residualMeasurementSD3 <- paste(
+    c(bifactorMeasurement, residualCovariancesSD3),
+    collapse = "\n"
+  )
+  
+  residualFitSD3 <- cfa(
+    residualMeasurementSD3,
+    estimator = "MLR",
+    std.lv = TRUE,
+    meanstructure = TRUE,
+    do.fit = FALSE,
+    data = replicationData
+  )
+  
+  cvSD3 <- crossValidationRes(
+    measurement = residualMeasurementSD3,
+    lambdas = lambdasSD3,
+    regularizedPars = regularizedSD3,
+    items = itemsSD3,
+    folds = 10
+  )
+  
+  lassoFitSD3 <- lessSEM::lasso(
+    lavaanModel = residualFitSD3,
+    regularized = regularizedSD3,
+    lambdas = lambdasSD3,
+    control = lessSEM::controlGlmnet(
+      nCores = 1
+    )
+  )
+  
+  residualRankingSD3 <- lassoFitSD3@parameters %>%
+    dplyr::select(
+      lambda,
+      dplyr::all_of(regularizedSD3)
+    ) %>%
+    filter(
+      lambda==cvSD3$bestLambda
+    ) %>%
+    tidyr::pivot_longer(
+      cols = -lambda,
+      names_to = "parameter",
+      values_to = "est"
+    ) %>%
+    dplyr::mutate(
+      magnitude = abs(est),
+      selected = est != 0
+    ) %>%
+    dplyr::group_by(lambda) %>%
+    dplyr::mutate(
+      rank = dplyr::min_rank(dplyr::desc(magnitude))
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(dplyr::desc(lambda), rank, parameter)
+  
+  residualRankingSD3 <- residualRankingSD3 %>%
+    tidyr::separate_wider_delim(
+      parameter,
+      delim = "_SEP_",
+      names = c("DROP", "lhs", "rhs")
+    ) %>%
+    select(-DROP)
+  
+  saveRDS(residualRankingSD3, file = "../Data/residualsSD3.rds")
+  
+  residualRankingSD3
+  
+}
+```
+
+#### Check fit
+
+```{r}
+
+set.seed(masterSeed)
+
+residualsBPAQ <- readRDS(file = "../Data/residualsBPAQ.rds")
+nFreeResidualsBPAQ <- 12
+residualsSD3 <- readRDS(file = "../Data/residualsSD3.rds")
+nFreeResidualsSD3 <- 10
+
+interceptsSD3 <- readRDS(file = "../Data/interceptsSD3.rds")
+nFreeInterceptsBPAQ <- 7
+interceptsBPAQ <- readRDS(file = "../Data/interceptsBPAQ.rds")
+nFreeInterceptsSD3 <- 4
+
+# ---------------------------------- BPAQ -------------------------------------
+
+cat("\n\n", "----------------------- BPAQ Invariance Metrics ---------------------------", "\n\n")
+
+
+residualMeasurementBPAQ <- paste(
+  'Physical =~ ', paste(physicalItems, collapse = " + "), ' \n ',
+  'Verbal =~ ', paste(verbalItems, collapse = " + "), ' \n ',
+  'Hostility =~ ', paste(hostilityItems, collapse = " + "), ' \n ',
+  'Anger =~ ', paste(angerItems, collapse = " + "), ' \n ',
+  paste0(
+    residualsBPAQ$lhs[1:nFreeResidualsBPAQ],
+    " ~~ ",
+    residualsBPAQ$rhs[1:nFreeResidualsBPAQ]
+  )
+)
+
+nullMeasurement <- paste(
+  c(physicalItems, verbalItems, hostilityItems, angerItems),
+  "~ 1", 
+  collapse = "\n"
+)
+
+nullFitBPAQ <- cfa(
+  nullMeasurement,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("intercepts", "residuals"),
+  auto.cov.y = FALSE,
+  auto.var = TRUE,
+  data = replicationData
+)
+
+configuralInvarianceFitBPAQ <- cfa(
+  residualMeasurementBPAQ,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  configuralInvarianceFitBPAQ, 
+  fit.measures = c("cfi", "cfi.robust", "rmsea", "rmsea.robust","srmr", "mfi"),
+  baseline.model = nullFitBPAQ
+)
+
+metricInvarianceFitBPAQ <- cfa(
+  residualMeasurementBPAQ,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("loadings"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  metricInvarianceFitBPAQ, 
+  fit.measures = c("cfi", "cfi.robust", "rmsea", "rmsea.robust", "srmr", "mfi"),
+  baseline.model = nullFitBPAQ
+)
+
+scalarInvarianceFitBPAQ <- cfa(
+  residualMeasurementBPAQ,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("loadings", "intercepts"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  scalarInvarianceFitBPAQ, 
+  fit.measures = c("cfi", "cfi.robust", "rmsea", "rmsea.robust", "srmr", "mfi"),
+  baseline.model = nullFitBPAQ
+)
+
+
+freeBPAQ <- interceptsBPAQ$lhs[1:nFreeInterceptsBPAQ]
+
+partialInvarianceFitBPAQ <- cfa(
+  residualMeasurementBPAQ,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("loadings", "intercepts"),
+  group.partial = paste0(freeBPAQ, "~ 1"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  partialInvarianceFitBPAQ, 
+  fit.measures = c("cfi", "cfi.robust", "rmsea", "rmsea.robust", "srmr", "mfi"),
+  baseline.model = nullFitBPAQ
+)
+
+cat("\n\n","BPAQ: ", nFreeResidualsBPAQ, " out of ", nrow(residualsBPAQ)," residual item covariances freed.", "\n\n")
+
+# ---------------------------------- SD3 -------------------------------------
+
+cat("----------------------- SD3 Invariance Metrics ---------------------------", "\n\n")
+
+residualMeasurementSD3 <- paste(
+  c(
+    bifactorMeasurement, 
+    paste0(residualsSD3$lhs[1:nFreeResidualsSD3], " ~~ ", residualsSD3$rhs[1:nFreeResidualsSD3])
+  ),
+  collapse = " \n "
+)
+
+nullMeasurement <- paste(coreItems, "~ 1", collapse = "\n")
+
+nullFitSD3 <- cfa(
+  nullMeasurement,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",   
+  group.label = c("0", "1"),
+  group.equal = c("intercepts", "residuals"),
+  auto.cov.y = FALSE,
+  auto.var = TRUE,
+  data = replicationData
+)
+
+configuralInvarianceFitSD3 <- cfa(
+  residualMeasurementSD3,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  configuralInvarianceFitSD3, 
+  fit.measures = c("cfi", "cfi.robust", "rmsea", "rmsea.robust","srmr", "mfi"),
+  baseline.model = nullFitSD3
+)
+
+metricInvarianceFitSD3 <- cfa(
+  residualMeasurementSD3,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("loadings"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  metricInvarianceFitSD3, 
+  fit.measures = c("cfi", "cfi.robust", "rmsea", "rmsea.robust", "srmr", "mfi"),
+  baseline.model = nullFitSD3
+)
+
+scalarInvarianceFitSD3 <- cfa(
+  residualMeasurementSD3,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("loadings", "intercepts"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  scalarInvarianceFitSD3, 
+  fit.measures = c("cfi", "cfi.robust", "rmsea", "rmsea.robust", "srmr", "mfi"),
+  baseline.model = nullFitSD3
+)
+
+freeSD3 <- interceptsSD3$lhs[1:nFreeInterceptsSD3]
+
+partialInvarianceFitSD3 <- cfa(
+  residualMeasurementSD3,  
+  estimator = "MLR",
+  meanstructure = TRUE,
+  group = "Male",
+  group.label = c("0", "1"),
+  group.equal = c("loadings", "intercepts"),
+  group.partial = paste0(freeSD3, "~ 1"),
+  std.lv = TRUE,
+  data = replicationData
+)
+
+fitMeasures(
+  partialInvarianceFitSD3, 
+  fit.measures = c("cfi", "cfi.robust", "rmsea", "rmsea.robust", "srmr", "mfi"),
+  baseline.model = nullFitSD3
+)
+
+cat("\n\n","SD3: ", nFreeResidualsSD3, " out of ", nrow(residualsSD3)," residual item covariances freed.", "\n\n")
+
+congenialResidualFit <- congenialFun(
+  measurementFit=list(partialInvarianceFitBPAQ, partialInvarianceFitSD3), 
+  covariates=c(
+    "Age"
+  ),
+  group="Male",
+  groupLabels = c("0", "1"),
+  data=replicationData
+)
+```
+
+##### HTML
+
+```{r}
+
+invarianceFitsSD3 <- list(
+  Configural = configuralInvarianceFitSD3,
+  Metric = metricInvarianceFitSD3,
+  Scalar = scalarInvarianceFitSD3,
+  Partial = partialInvarianceFitSD3
+)
+
+invarianceTableSD3 <- purrr::imap_dfr(
+  invarianceFitsSD3,
+  function(fit, modelName) {
+    
+    indices <- fitMeasures(
+      fit,
+      fit.measures = c(
+        "cfi.robust",
+        "rmsea.robust",
+        "srmr"
+      ),
+      baseline.model = nullFitSD3
+    )
+    
+    tibble::as_tibble_row(
+      c(list(Model = modelName), as.list(indices))
+    )
+  }
+) %>%
+  mutate(
+    across(
+      c(cfi.robust, rmsea.robust, srmr),
+      ~ .x - .x[c(NA_integer_, 1L, 2L, 2L)],
+      .names = "delta_{.col}"
+    ),
+    across(
+      where(is.numeric),
+      ~ ifelse(
+        is.na(.x),
+        NA_character_,
+        sub("^(-?)0\\.", "\\1.", sprintf("%.4f", .x))
+      )
+    ),
+    Panel = "SD3"
+  )
+
+invarianceFitsBPAQ <- list(
+  Configural = configuralInvarianceFitBPAQ,
+  Metric = metricInvarianceFitBPAQ,
+  Scalar = scalarInvarianceFitBPAQ,
+  Partial = partialInvarianceFitBPAQ
+)
+
+invarianceTableBPAQ <- purrr::imap_dfr(
+  invarianceFitsBPAQ,
+  function(fit, modelName) {
+    
+    indices <- fitMeasures(
+      fit,
+      fit.measures = c(
+        "cfi.robust",
+        "rmsea.robust",
+        "srmr"
+      ),
+      baseline.model = nullFitBPAQ
+    )
+    
+    tibble::as_tibble_row(
+      c(list(Model = modelName), as.list(indices))
+    )
+  }
+) %>%
+  mutate(
+    across(
+      c(cfi.robust, rmsea.robust, srmr),
+      ~ .x - .x[c(NA_integer_, 1L, 2L, 2L)],
+      .names = "delta_{.col}"
+    ),
+    across(
+      where(is.numeric),
+      ~ ifelse(
+        is.na(.x),
+        NA_character_,
+        sub("^(-?)0\\.", "\\1.", sprintf("%.4f", .x))
+      )
+    ),
+    Panel = "BPAQ"
+  )
+
+residualFitTable <- dplyr::bind_rows(invarianceTableBPAQ, invarianceTableSD3)
+
+residualFitGT <- residualFitTable %>%
+  dplyr::select(
+    Model,
+    Panel,
+    cfi.robust, delta_cfi.robust,
+    rmsea.robust, delta_rmsea.robust,
+    srmr, delta_srmr
+  ) %>%
+  gt::gt(
+    rowname_col = "Model",
+    groupname_col = "Panel"
+  ) %>%
+  gt::cols_label(
+    cfi.robust = "CFI",
+    rmsea.robust = "RMSEA",
+    srmr = "SRMR",
+    delta_cfi.robust = "ΔCFI",
+    delta_rmsea.robust = "ΔRMSEA",
+    delta_srmr = "ΔSRMR"
+  ) %>%
+  gt::tab_stubhead(label = "") %>%
+  gt::fmt_markdown(
+    columns = -Model
+  ) %>%
+  gt::cols_align(
+    align = "center",
+    columns = -Model
+  ) %>%
+  gt::sub_missing(
+    columns = -Model,
+    missing_text = "—"
+  ) %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(
+      groups = everything()
+    )
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+residualFitGT
+
+if (export) {
+  
+  residualFitGT_png <- residualFitGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    residualFitGT_png,
+    filename = "../Tables/residualFitTable.png",
+    zoom = 3.125,
+    expand = 0
+  )
+  
+}
+```
+
+##### LaTeX
+
+```{r}
+
+if (export) {
+  
+  # Convert one HTML-formatted result cell to LaTeX
+  toLatexCell <- function(x) {
+    if (is.na(x)) {
+      return("\\textemdash{}")
+    }
+    
+    x <- gsub("&lt;", "$<$", x, fixed = TRUE)
+    
+    # Replace each complete star sequence exactly once
+    x <- gsub(
+      "(\\*{1,3})",
+      "{\\\\tiny \\1}",
+      x,
+      perl = TRUE
+    )
+    
+    lines <- strsplit(x, "<br>", fixed = TRUE)[[1]]
+    
+    paste0(
+      "\\makecell{",
+      paste(lines, collapse = " \\\\ "),
+      "}"
+    )
+  }
+  
+  residualFitLatex <- residualFitTable %>%
+    mutate(
+      across(
+        -c(Model, Panel),
+        \(x) vapply(x, toLatexCell, character(1))
+      )
+    )
+  
+  panelSizes <- table(residualFitTable$Panel)
+  
+  nBPAQ <- unname(panelSizes["BPAQ"])
+  nSD3  <- unname(panelSizes["SD3"])
+  
+  residualFitKable <- residualFitLatex %>%
+    dplyr::select(
+      Model,
+      cfi.robust, delta_cfi.robust,
+      rmsea.robust, delta_rmsea.robust,
+      srmr, delta_srmr
+    ) %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", 6)),
+      col.names = c(
+        "BPAQ",
+        "CFI", "\\Delta CFI",
+        "RMSEA", "\\Delta RMSEA",
+        "SRMR", "\\Delta SRMR"
+      )
+    ) %>%
+    kableExtra::pack_rows(
+      "SD3",
+      start_row = nBPAQ + 1,
+      end_row = nBPAQ + nSD3,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(residualFitTable) - 1),
+      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(residualFitKable),
+    "../Tables/residualFitTable.tex"
+  )
+  
+}
+```
+
+#### Sensitivity
+
+```{r}
+
+if (parallelSupported) {
+  structuralFit <- pbmcapply::pbmclapply(
+    X = 1:M,
+    FUN = plausibleFun,
+    structuralModel = saturatedModel, 
+    measurementFit = congenialResidualFit,
+    VWLE=TRUE,
+    g=c("Reference", "Reference:Male"),
+    s=list(c("Psychopathy", "Narcissism"), c("Psychopathy:Male", "Narcissism:Male")),
+    covariatesVWLE = c("Male"),
+    data = replicationData,
+    masterSeed = masterSeed,
+    mc.cores = availableCores,
+    mc.set.seed = TRUE
+  )
+} else {
+  structuralFit <- lapply(
+    X = 1:M,
+    FUN = plausibleFun,
+    structuralModel = saturatedModel, 
+    measurementFit = congenialResidualFit,
+    VWLE=TRUE,
+    g=c("Reference", "Reference:Male"),
+    s=list(c("Psychopathy", "Narcissism"), c("Psychopathy:Male", "Narcissism:Male")),
+    covariatesVWLE = c("Male"),
+    data = replicationData,
+    masterSeed = masterSeed
+  )
+}
+
+freeFit <- processFunPV(structuralFit)
+
+freeFit %>%
+  filter(op %in% c("~", "gof") & !(rhs %in% c("N"))) %>%
+  dplyr::select(lhs, rhs, Eta2, Estimate, SE, Z, P) %>%
+  mutate(
+    across(c(Eta2, Estimate, SE, Z, P), \(x) round(x, digits = 4))
+  )
+```
+
+##### HTML
+
+```{r}
+
+outcomeLevels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+outcomeLabels <- c(
+  "Physical (Z)",
+  "Verbal (Z)",
+  "Hostility (Z)",
+  "Anger (Z)"
+)
+
+termLevels <- c(
+  "Male",
+  "Reference",
+  "Reference:Male",
+  "Psychopathy",
+  "Psychopathy:Male",
+  "Narcissism",
+  "Narcissism:Male",
+  "",
+  "R2",
+  "N"
+)
+
+termLabels <- c(
+  "Male",
+  "Reference (Z)",
+  "Reference × Male",
+  "Psychopathy (Z)",
+  "Psychopathy × Male",
+  "Narcissism (Z)",
+  "Narcissism × Male",
+  "Intercept",
+  "R²",
+  "N"
+)
+
+modelLevels <- c("Fixed", "Free")
+modelLabels <- c("Fixed", "Free")
+
+saturatedFit$model <- "Fixed"
+freeFit$model <- "Free"
+
+fitSensitivityTable <- dplyr::bind_rows(saturatedFit, freeFit) %>%
+  filter(op %in% c("~", "gof") | (lhs %in% outcomeLevels & op == "~1")) %>%
+  filter(!endsWith(rhs, "VWLE")) %>%
+  mutate(
+    stars = case_when(
+      P <= 0.001 ~ "***",
+      P <= 0.01  ~ "**",
+      P <= 0.05  ~ "*",
+      .default = ""
+    ),
+    pFormatted = if_else(
+      P < 0.001,
+      "&lt;.001",
+      paste0("=", sub("^0", "", sprintf("%.3f", P)))
+    ),
+    Estimate = case_when(
+      endsWith(rhs, "VWLE") ~ sprintf(
+        "%.3f%s<br>(%.3f)",
+        Estimate, stars, SE
+      ),
+      op %in% c("~", "~1") ~ sprintf(
+        "%.3f%s<br>(%.3f)<br>p%s",
+        Estimate, stars, SE, pFormatted
+      ),
+      rhs == "N" ~ sprintf("%.0f", Estimate),
+      .default = sprintf("%.3f", Estimate)
+    ),
+    Outcome = factor(
+      lhs,
+      levels = outcomeLevels,
+      labels = outcomeLabels
+    ),
+    Model = factor(
+      model,
+      levels = modelLevels,
+      labels = modelLabels
+    ),
+    Panel = factor(
+      case_when(
+        op %in% c("~", "~1") ~ "Structural",
+        op == "gof" ~ "Model information",
+        .default = ""
+      ),
+      levels = c("Structural", "Model information")
+    ),
+    Term = factor(
+      rhs, 
+      levels = termLevels,
+      labels = termLabels
+    )
+  ) %>%
+  dplyr::select(
+    Outcome,
+    Term,
+    Model,
+    Estimate,
+    Panel
+  )
+
+fitSensitivityTable <- fitSensitivityTable %>%
+  tidyr::pivot_wider(
+    id_cols = c(Panel, Term),
+    names_from = c(Outcome, Model),
+    values_from = Estimate,
+    names_sep = "_",
+    names_expand = TRUE
+  ) %>%
+  arrange(Panel, Term)
+
+fitSensitivityGT <- fitSensitivityTable %>%
+  gt::gt(
+    rowname_col = "Term",
+    groupname_col = "Panel"
+  ) %>%
+  gt::tab_spanner(
+    label = "Physical (Z)",
+    columns = starts_with("Physical")
+  ) %>%
+  gt::tab_spanner(
+    label = "Verbal (Z)",
+    columns = starts_with("Verbal")
+  ) %>%
+  gt::tab_spanner(
+    label = "Hostility (Z)",
+    columns = starts_with("Hostility")
+  ) %>%
+  gt::tab_spanner(
+    label = "Anger (Z)",
+    columns = starts_with("Anger")
+  ) %>%
+  gt::cols_label(
+    ends_with("Fixed") ~ "Fixed",
+    ends_with("Free")  ~ "Free"
+  ) %>%
+  gt::fmt_markdown(
+    columns = -Term
+  ) %>%
+  gt::cols_align(
+    align = "center",
+    columns = -Term
+  ) %>%
+  gt::sub_missing(
+    columns = -Term,
+    missing_text = "—"
+  ) %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(
+      groups = everything()
+    )
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+fitSensitivityGT
+
+if(export) {
+  fitSensitivityGT_png <- fitSensitivityGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    fitSensitivityGT_png,
+    filename = "../Tables/fitSensitivityTable.png",
+    zoom = 3.125,
+    expand = 0
+  ) 
+}
+```
+
+##### LaTeX
+
+```{r}
+
+if(export) {
+  
+  # Convert one HTML-formatted result cell to LaTeX
+  toLatexCell <- function(x) {
+    if (is.na(x)) {
+      return("\\textemdash{}")
+    }
+    
+    x <- gsub("&lt;", "$<$", x, fixed = TRUE)
+    
+    # Replace each complete star sequence exactly once
+    x <- gsub(
+      "(\\*{1,3})",
+      "{\\\\tiny \\1}",
+      x,
+      perl = TRUE
+    )
+    
+    lines <- strsplit(x, "<br>", fixed = TRUE)[[1]]
+    
+    paste0(
+      "\\makecell{",
+      paste(lines, collapse = " \\\\ "),
+      "}"
+    )
+  }
+  
+  
+  fitSensitivityLatex <- fitSensitivityTable %>%
+    mutate(
+      Panel = as.character(Panel),
+      Term = as.character(Term),
+      Term = recode(
+        Term,
+        "Reference × Male" = "Reference $\\times$ Male",
+        "Psychopathy × Male" = "Psychopathy $\\times$ Male",
+        "Narcissism × Male" = "Narcissism $\\times$ Male",
+        "R²" = "$\\text{R}^2$"
+      )
+    ) %>%
+    mutate(
+      across(
+        -c(Panel, Term),
+        \(x) vapply(x, toLatexCell, character(1))
+      )
+    )
+  
+  
+  # Determine panel positions automatically
+  panelRuns <- rle(fitSensitivityLatex$Panel)
+  
+  panelIndex <- stats::setNames(
+    panelRuns$lengths,
+    panelRuns$values
+  )
+  
+  panelSizes <- table(fitSensitivityLatex$Panel)
+  
+  nPredictors <- unname(panelSizes["Structural"])
+  nModelInfo <- unname(panelSizes["Model information"])
+  
+  fitSensitivityKable <- fitSensitivityLatex %>%
+    dplyr::select(-Panel) %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", 8)),
+      col.names = c("Structural", rep(c("Fixed", "Free"), 4))
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(fitSensitivityLatex) - 1),
+      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::add_header_above(
+      c(
+        " " = 1,
+        "Physical (Z)" = 2,
+        "Verbal (Z)" = 2,
+        "Hostility (Z)" = 2,
+        "Anger (Z)" = 2
+      ),
+      escape = FALSE,
+      bold = TRUE
+    ) %>%
+    kableExtra::pack_rows(
+      "Model information",
+      start_row = nPredictors + 1,
+      end_row = nPredictors + nModelInfo,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(fitSensitivityKable),
+    "../Tables/fitSensitivityTable.tex"
+  )
+  
+}
+```
+
+### Bootstrap diagnostics
+
+#### Interactions
+
+```{r}
+
+outcomeLevels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+outcomeLabels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+termLevels <- c(
+  "Male",
+  "Reference",
+  "Reference:Male",
+  "Psychopathy",
+  "Psychopathy:Male",
+  "Narcissism",
+  "Narcissism:Male"
+)
+
+termLabels <- c(
+  "Male",
+  "Reference",
+  "Reference × Male",
+  "Psychopathy",
+  "Psychopathy × Male",
+  "Narcissism",
+  "Narcissism × Male"
+)
+
+interactionBootTable <- saturatedBoot %>%
+  filter(lhs %in% c("Physical", "Verbal"), endsWith(rhs, "Male"), op == "~") %>%
+  mutate(
+    Outcome = factor(lhs, outcomeLevels, outcomeLabels), 
+    Term = factor(rhs, termLevels, termLabels),
+    mcShareBoot = mcShareBoot * 100,
+    across(
+      c(Estimate, meanBoot, biasBoot, SE, seBoot,
+        mcErrBoot, mcShareBoot),
+      \(x) sprintf("%.3f", x)
+    ),
+    across(
+      c(P, pBoot),
+      \(x) ifelse(
+        x < 0.001,
+        "&lt;.001",
+        sprintf("%.3f", x)
+      )
+    )
+  ) %>%
+  dplyr::select(Outcome, Term, Estimate, meanBoot, biasBoot, SE, seBoot, P, pBoot, mcErrBoot, mcShareBoot) %>%
+  arrange(Outcome, Term)
+  
+
+interactionBootGT <- interactionBootTable %>%
+  gt::gt(
+    rowname_col = "Term",
+    groupname_col = "Outcome"
+  ) %>%
+  gt::cols_label(
+    Term = "Term",
+    Estimate = "Est",
+    meanBoot = "Est (B)",
+    biasBoot = "Bias (B)",
+    SE = "SE",
+    seBoot = "SE (B)",
+    P = "P",
+    pBoot = "P (B)",
+    mcErrBoot = "MC Error",
+    mcShareBoot = "MC Share (%)"
+  ) %>%
+  gt::fmt_markdown(columns = everything()) %>%
+  gt::tab_stubhead(label = "") %>%
+  gt::cols_align(
+    align = "center",
+  ) %>%
+  gt::sub_missing(
+    missing_text = "—"
+  ) %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(
+      groups = everything()
+    )
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+interactionBootGT
+
+if (export) {
+  
+  interactionBootGT_png <- interactionBootGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    interactionBootGT_png,
+    filename = "../Tables/interactionBootTable.png",
+    zoom = 3.125,
+    expand = 0
+  )
+  
+}
+
+if(export) {
+  
+  # Convert one HTML-formatted result cell to LaTeX
+  toLatexCell <- function(x) {
+    if (is.na(x)) {
+      return("\\textemdash{}")
+    }
+    
+    x <- gsub("&lt;", "$<$", x, fixed = TRUE)
+    
+    # Replace each complete star sequence exactly once
+    x <- gsub(
+      "(\\*{1,3})",
+      "{\\\\tiny \\1}",
+      x,
+      perl = TRUE
+    )
+    
+    lines <- strsplit(x, "<br>", fixed = TRUE)[[1]]
+    
+    paste0(
+      "\\makecell{",
+      paste(lines, collapse = " \\\\ "),
+      "}"
+    )
+  }
+  
+  interactionBootTableLatex <- interactionBootTable %>%
+    mutate(
+      Outcome = as.character(Outcome),
+      Term = as.character(Term),
+      Term = recode(
+        Term,
+        "Reference × Male" = "Reference $\\times$ Male",
+        "Psychopathy × Male" = "Psychopathy $\\times$ Male",
+        "Narcissism × Male" = "Narcissism $\\times$ Male",
+      )
+    ) %>%
+    mutate(
+      across(
+        -c(Outcome, Term),
+        \(x) vapply(x, toLatexCell, character(1))
+      )
+    ) %>%
+    rename(
+      Est = Estimate,
+      `Est (B)` = meanBoot,
+      `Bias (B)` = biasBoot,
+      `SE (B)` = seBoot,
+      `P (B)` = pBoot,
+      `MC Error` = mcErrBoot,
+      `MC Share (\\%)` = mcShareBoot
+    )
+  
+  
+  # Determine panel positions automatically
+  panelRuns <- rle(interactionBootTableLatex$Outcome)
+  
+  panelIndex <- stats::setNames(
+    panelRuns$lengths,
+    panelRuns$values
+  )
+  
+  panelSizes <- table(interactionBootTableLatex$Outcome)
+  
+  nPhysical <- unname(panelSizes["Physical"])
+  nVerbal <- unname(panelSizes["Verbal"])
+  
+  interactionBootKable <- interactionBootTableLatex %>%
+    dplyr::select(-Outcome) %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", ncol(interactionBootTableLatex) - 2)),
+      col.names = c("Physical", colnames(interactionBootTableLatex)[-c(1:2)])
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(interactionBootTableLatex) - 1),
+      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::pack_rows(
+      "Verbal",
+      start_row = nPhysical + 1,
+      end_row = nPhysical + nVerbal,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(interactionBootKable),
+    "../Tables/interactionBootTable.tex"
+  )
+
+}
+```
+
+#### Low convergence
+
+##### Correlated
+
+```{r}
+
+outcomeLevels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+outcomeLabels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+termLevels <- c(
+  "Male",
+  "Machiavellianism (FO)",
+  "Psychopathy (FO)",
+  "Narcissism (FO)",
+  ""
+)
+
+termLabels <- c(
+  "Male",
+  "Machiavellianism",
+  "Psychopathy",
+  "Narcissism",
+  "Intercept"
+)
+
+correlatedBootTable <- correlatedFactorsBoot %>%
+  dplyr::filter(
+    lhs %in% outcomeLevels,
+    op == "~"
+  ) %>%
+  mutate(
+    Outcome = factor(
+      lhs,
+      levels = outcomeLevels,
+      labels = outcomeLabels
+    ),
+    Term = factor(
+      rhs, 
+      levels = termLevels,
+      labels = termLabels
+    ),
+    mcShareBoot = mcShareBoot * 100,
+    across(
+      c(Estimate, meanBoot, biasBoot, SE, seBoot,
+        mcErrBoot, mcShareBoot),
+      \(x) sprintf("%.3f", x)
+    ),
+    across(
+      c(P, pBoot),
+      \(x) ifelse(
+        x < 0.001,
+        "&lt;.001",
+        sprintf("%.3f", x)
+      )
+    )
+  ) %>%
+  dplyr::select(Outcome, Term, Estimate, meanBoot, biasBoot, SE, seBoot, P, pBoot, mcErrBoot, mcShareBoot) %>%
+  arrange(Outcome, Term)
+
+correlatedBootGT <- correlatedBootTable %>%
+  gt::gt(
+    rowname_col = "Term",
+    groupname_col = "Outcome"
+  ) %>%
+  gt::cols_label(
+    Term = "Term",
+    Estimate = "Est",
+    meanBoot = "Est (B)",
+    biasBoot = "Bias (B)",
+    SE = "SE",
+    seBoot = "SE (B)",
+    P = "P",
+    pBoot = "P (B)",
+    mcErrBoot = "MC Error",
+    mcShareBoot = "MC Share (%)"
+  ) %>%
+  gt::fmt_markdown(columns = everything()) %>%
+  gt::tab_stubhead(label = "") %>%
+  gt::cols_align(
+    align = "center",
+  ) %>%
+  gt::sub_missing(
+    missing_text = "—"
+  ) %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(
+      groups = everything()
+    )
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+correlatedBootGT
+
+if (export) {
+  
+  correlatedBootGT_png <- correlatedBootGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    correlatedBootGT_png,
+    filename = "../Tables/correlatedBootTable.png",
+    zoom = 3.125,
+    expand = 0
+  )
+  
+}
+
+if(export) {
+  
+  # Convert one HTML-formatted result cell to LaTeX
+  toLatexCell <- function(x) {
+    if (is.na(x)) {
+      return("\\textemdash{}")
+    }
+    
+    x <- gsub("&lt;", "$<$", x, fixed = TRUE)
+    
+    # Replace each complete star sequence exactly once
+    x <- gsub(
+      "(\\*{1,3})",
+      "{\\\\tiny \\1}",
+      x,
+      perl = TRUE
+    )
+    
+    lines <- strsplit(x, "<br>", fixed = TRUE)[[1]]
+    
+    paste0(
+      "\\makecell{",
+      paste(lines, collapse = " \\\\ "),
+      "}"
+    )
+  }
+  
+  correlatedBootTableLatex <- correlatedBootTable %>%
+    mutate(
+      Outcome = as.character(Outcome),
+      Term = as.character(Term),
+    ) %>%
+    mutate(
+      across(
+        -c(Outcome, Term),
+        \(x) vapply(x, toLatexCell, character(1))
+      )
+    ) %>%
+    rename(
+      Est = Estimate,
+      `Est (B)` = meanBoot,
+      `Bias (B)` = biasBoot,
+      `SE (B)` = seBoot,
+      `P (B)` = pBoot,
+      `MC Error` = mcErrBoot,
+      `MC Share (\\%)` = mcShareBoot
+    )
+  
+  
+  # Determine panel positions automatically
+  panelRuns <- rle(correlatedBootTableLatex$Outcome)
+  
+  panelIndex <- stats::setNames(
+    panelRuns$lengths,
+    panelRuns$values
+  )
+  
+  panelSizes <- table(correlatedBootTableLatex$Outcome)
+  
+  nPhysical <- unname(panelSizes["Physical"])
+  nVerbal <- unname(panelSizes["Verbal"])
+  nHostility <- unname(panelSizes["Hostility"])
+  nAnger <- unname(panelSizes["Anger"])
+
+  correlatedBootKable <- correlatedBootTableLatex %>%
+    dplyr::select(-Outcome) %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", ncol(correlatedBootTableLatex) - 2)),
+      col.names = c("Physical", colnames(correlatedBootTableLatex)[-c(1:2)])
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(correlatedBootTableLatex) - 1),
+      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::pack_rows(
+      "Verbal",
+      start_row = nPhysical + 1,
+      end_row = nPhysical + nVerbal,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::pack_rows(
+      "Hostility",
+      start_row = nPhysical + nVerbal + 1,
+      end_row = nPhysical + nVerbal + nHostility,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::pack_rows(
+      "Anger",
+      start_row = nPhysical + nVerbal + nHostility + 1,
+      end_row = nPhysical + nVerbal + nHostility + nAnger,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(correlatedBootKable),
+    "../Tables/correlatedBootTable.tex"
+  )
+  
+}
+```
+
+##### Narcissism
+
+```{r}
+
+outcomeLevels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+outcomeLabels <- c(
+  "Physical",
+  "Verbal",
+  "Hostility",
+  "Anger"
+)
+
+termLevels <- c(
+  "Male",
+  "Narcissism (FO)",
+  "Machiavellianism",
+  "MachiavellianismVWLE",
+  "Psychopathy",
+  "PsychopathyVWLE",
+  ""
+)
+
+termLabels <- c(
+  "Male",
+  "Reference",
+  "Machiavellianism",
+  "Machiavellianism (VWLE)",
+  "Psychopathy",
+  "Psychopathy (VWLE)",
+  "Intercept"
+)
+
+narcissismBootTable <- narcissismReferenceBoot %>%
+  dplyr::filter(
+    lhs %in% outcomeLevels,
+    op == "~"
+  ) %>%
+  mutate(
+    mcShareBoot = mcShareBoot * 100,
+    across(
+      c(Estimate, meanBoot, biasBoot, SE, seBoot,
+        mcErrBoot, mcShareBoot),
+      \(x) sprintf("%.3f", x)
+    ),
+    across(
+      c(P, pBoot),
+      \(x) ifelse(
+        x < 0.001,
+        "&lt;.001",
+        sprintf("%.3f", x)
+      )
+    ),
+    SE = ifelse(
+      endsWith(rhs, "VWLE"), NA, SE
+    ),
+    P = ifelse(
+      endsWith(rhs, "VWLE"), NA, P
+    ),
+    Outcome = factor(
+      lhs,
+      levels = outcomeLevels,
+      labels = outcomeLabels
+    ),
+    Term = factor(
+      rhs, 
+      levels = termLevels,
+      labels = termLabels
+    )
+  ) %>%
+  dplyr::select(Outcome, Term, Estimate, meanBoot, biasBoot, SE, seBoot, P, pBoot, mcErrBoot, mcShareBoot) %>%
+  arrange(Outcome, Term)
+
+narcissismBootGT <- narcissismBootTable %>%
+  gt::gt(
+    rowname_col = "Term",
+    groupname_col = "Outcome"
+  ) %>%
+  gt::cols_label(
+    Term = "Term",
+    Estimate = "Est",
+    meanBoot = "Est (B)",
+    biasBoot = "Bias (B)",
+    SE = "SE",
+    seBoot = "SE (B)",
+    P = "P",
+    pBoot = "P (B)",
+    mcErrBoot = "MC Error",
+    mcShareBoot = "MC Share (%)"
+  ) %>%
+  gt::fmt_markdown(columns = everything()) %>%
+  gt::tab_stubhead(label = "") %>%
+  gt::cols_align(
+    align = "center",
+  ) %>%
+  gt::sub_missing(
+    missing_text = "—"
+  ) %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(
+      groups = everything()
+    )
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+narcissismBootGT
+
+if (export) {
+  
+  narcissismBootGT_png <- narcissismBootGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    narcissismBootGT_png,
+    filename = "../Tables/narcissismBootTable.png",
+    zoom = 3.125,
+    expand = 0
+  )
+  
+}
+
+if(export) {
+  
+  # Convert one HTML-formatted result cell to LaTeX
+  toLatexCell <- function(x) {
+    if (is.na(x)) {
+      return("\\textemdash{}")
+    }
+    
+    x <- gsub("&lt;", "$<$", x, fixed = TRUE)
+    
+    # Replace each complete star sequence exactly once
+    x <- gsub(
+      "(\\*{1,3})",
+      "{\\\\tiny \\1}",
+      x,
+      perl = TRUE
+    )
+    
+    lines <- strsplit(x, "<br>", fixed = TRUE)[[1]]
+    
+    paste0(
+      "\\makecell{",
+      paste(lines, collapse = " \\\\ "),
+      "}"
+    )
+  }
+  
+  narcissismBootTableLatex <- narcissismBootTable %>%
+    mutate(
+      Outcome = as.character(Outcome),
+      Term = as.character(Term),
+    ) %>%
+    mutate(
+      across(
+        -c(Outcome, Term),
+        \(x) vapply(x, toLatexCell, character(1))
+      )
+    ) %>%
+    rename(
+      Est = Estimate,
+      `Est (B)` = meanBoot,
+      `Bias (B)` = biasBoot,
+      `SE (B)` = seBoot,
+      `P (B)` = pBoot,
+      `MC Error` = mcErrBoot,
+      `MC Share (\\%)` = mcShareBoot
+    )
+  
+  
+  # Determine panel positions automatically
+  panelRuns <- rle(narcissismBootTableLatex$Outcome)
+  
+  panelIndex <- stats::setNames(
+    panelRuns$lengths,
+    panelRuns$values
+  )
+  
+  panelSizes <- table(narcissismBootTableLatex$Outcome)
+  
+  nPhysical <- unname(panelSizes["Physical"])
+  nVerbal <- unname(panelSizes["Verbal"])
+  nHostility <- unname(panelSizes["Hostility"])
+  nAnger <- unname(panelSizes["Anger"])
+  
+  narcissismBootKable <- narcissismBootTableLatex %>%
+    dplyr::select(-Outcome) %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", ncol(narcissismBootTableLatex) - 2)),
+      col.names = c("Physical", colnames(narcissismBootTableLatex)[-c(1:2)])
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(narcissismBootTableLatex) - 1),
+      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::pack_rows(
+      "Verbal",
+      start_row = nPhysical + 1,
+      end_row = nPhysical + nVerbal,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::pack_rows(
+      "Hostility",
+      start_row = nPhysical + nVerbal + 1,
+      end_row = nPhysical + nVerbal + nHostility,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::pack_rows(
+      "Anger",
+      start_row = nPhysical + nVerbal + nHostility + 1,
+      end_row = nPhysical + nVerbal + nHostility + nAnger,
+      bold = TRUE,
+      hline_after = FALSE,
+      extra_latex_after = "\\midrule ",
+      indent = FALSE,
+      escape = FALSE,
+      latex_align = "@{}l@{}"
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(narcissismBootKable),
+    "../Tables/narcissismBootTable.tex"
+  )
+  
+}
+```
+
+### Joint model
+
+```{r}
+
+set.seed(masterSeed)
+
+jointModel <- paste0(
+  bifactorMeasurement, " \n ",
+  responseMeasurement, " \n ",
+  '
+  Physical ~ c(p1,p2)*1 + c(p3,p4)*Reference + c(p5,p6)*Psychopathy + c(p7,p8)*Narcissism
+  Verbal ~ c(v1,v2)*1 + c(v3,v4)*Reference + c(v5,v6)*Psychopathy + c(v7,v8)*Narcissism
+  Hostility ~ c(h1,h2)*1 + c(h3,h4)*Reference + c(h5,h6)*Psychopathy + c(h7,h8)*Narcissism
+  Anger ~ c(a1,a2)*1 + c(a3,a4)*Reference + c(a5,a6)*Psychopathy + c(a7,a8)*Narcissism
+  
+  Physical ~~ Verbal
+  Physical ~~ Hostility
+  Physical ~~ Anger
+  Verbal ~~ Hostility
+  Verbal ~~ Anger
+  Hostility ~~ Anger
+  
+  # Physical: Group 2 - Group 1
+  diff_p_intercept := p2 - p1
+  diff_p_reference := p4 - p3
+  diff_p_psychopathy := p6 - p5
+  diff_p_narcissism := p8 - p7
+  
+  # Verbal: Group 2 - Group 1
+  diff_v_intercept := v2 - v1
+  diff_v_reference := v4 - v3
+  diff_v_psychopathy := v6 - v5
+  diff_v_narcissism := v8 - v7
+  
+  # Hostility: Group 2 - Group 1
+  diff_h_intercept := h2 - h1
+  diff_h_reference := h4 - h3
+  diff_h_psychopathy := h6 - h5
+  diff_h_narcissism := h8 - h7
+  
+  # Anger: Group 2 - Group 1
+  diff_a_intercept := a2 - a1
+  diff_a_reference := a4 - a3
+  diff_a_psychopathy := a6 - a5
+  diff_a_narcissism := a8 - a7
+  '
+)
+
+jointFit <- sem(
+  jointModel,
+  estimator = "MLR",
+  std.lv = TRUE,
+  meanstructure = TRUE,
+  group="Male",
+  group.label = c("0", "1"),
+  group.equal=c("loadings", "intercepts"),
+  group.partial=paste0(c(freeBPAQ, freeSD3), "~ 1"),
+  data = replicationData
+)
+
+parameterEstimates(
+  jointFit,
+  ci = FALSE
+) |>
+  subset(op == ":=")
 ```
