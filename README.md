@@ -1,6 +1,6 @@
 # Dark Triad and trait aggression
 
-Replication package for **“Sex differences in the relationship between the Dark Triad and trait aggression: A variance-weighted interpretation of the bifactor model.”**
+Replication package for **“The Dark Triad and trait aggression in women and men: Clarifying the substantive consequences of factor overlap.”**
 
 ## Replication files
 
