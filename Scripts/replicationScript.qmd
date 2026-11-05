@@ -4,7 +4,7 @@ format: html
 editor: visual
 ---
 
-# Sex differences in the relationship between the Dark Triad and trait aggression: A variance-weighted interpretation of the bifactor model
+# **The Dark Triad and trait aggression in women and men: Clarifying the substantive consequences of factor overlap**
 
 ## Notes on replication package
 
@@ -5218,12 +5218,14 @@ exploratoryTableFull <- exploratoryTable %>%
   arrange(Panel, Term)
 
 exploratoryTableLean <- exploratoryTable %>%
+  filter(Model == "E2") %>%
+  arrange(Outcome, Panel, Term) %>%
   tidyr::pivot_wider(
     id_cols = c(Panel, Term),
-    names_from = c(Outcome, Model),
+    names_from = c(Outcome),
     values_from = Estimate,
     names_sep = "_",
-    names_expand = TRUE
+    names_expand = FALSE
   ) %>%
   filter(!(Term %in% c("Age", "Intercept"))) %>%
   arrange(Panel, Term)
@@ -5232,26 +5234,6 @@ exploratoryGT <- exploratoryTableLean %>%
   gt::gt(
     rowname_col = "Term",
     groupname_col = "Panel"
-  ) %>%
-  gt::tab_spanner(
-    label = "Physical (Z)",
-    columns = starts_with("Physical")
-  ) %>%
-  gt::tab_spanner(
-    label = "Verbal (Z)",
-    columns = starts_with("Verbal")
-  ) %>%
-  gt::tab_spanner(
-    label = "Hostility (Z)",
-    columns = starts_with("Hostility")
-  ) %>%
-  gt::tab_spanner(
-    label = "Anger (Z)",
-    columns = starts_with("Anger")
-  ) %>%
-  gt::cols_label(
-    ends_with("E1") ~ "E1",
-    ends_with("E2") ~ "E2"
   ) %>%
   gt::fmt_markdown(
     columns = -Term
@@ -5370,22 +5352,11 @@ if(export) {
       booktabs = TRUE,
       escape = FALSE,
       align = c("l", rep("c", 8)),
-      col.names = c("Structural", rep(c("E1", "E2"), 4))
+      col.names = c("Structural", outcomeLabels)
     ) %>%
     kableExtra::row_spec(
       row = seq_len(nrow(exploratoryTableLatex) - 1),
       extra_latex_after = "\\addlinespace[0.5em]"
-    ) %>%
-    kableExtra::add_header_above(
-      c(
-        " " = 1,
-        "Physical (Z)" = 2,
-        "Verbal (Z)" = 2,
-        "Hostility (Z)" = 2,
-        "Anger (Z)" = 2
-      ),
-      escape = FALSE,
-      bold = TRUE
     ) %>%
     kableExtra::pack_rows(
       "VWLE",
