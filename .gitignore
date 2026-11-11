@@ -1,0 +1,14 @@
+# Local R/RStudio state
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Quarto/knitr temporary files
+.quarto/
+*_cache/
+*.knit.md
+*.utf8.md
+
+# macOS metadata
+.DS_Store
