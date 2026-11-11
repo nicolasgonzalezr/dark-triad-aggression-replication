@@ -41,4 +41,4 @@ Tables and figures are exported to `Tables/` and `Plots/`.
 
 ## Contact
 
-Nicolás González-Raposo — nicgonzalezr@udd.cl
+Nicolás González-Raposo — nicgonzalezr@udd.cl · [ORCID](https://orcid.org/0000-0002-2723-0354)
