@@ -42,6 +42,7 @@ requiredPackages <- c(
   "tidyverse",
   "lavaan",
   "semTools",
+  "BifactorIndicesCalculator",
   "lessSEM",
   "pbmcapply",
   "see",
@@ -68,13 +69,14 @@ if (length(missingPackages) > 0L) {
 }
 
 library(tidyverse)
-library(lavaan)       # SEM
-library(semTools)     # Reliability and plausible values
-library(lessSEM)      # Regularized multigroup CFA
-library(pbmcapply)    # Parallel computation
-library(see)          # Half violin plots
-library(gt)           # Print HTML tables
-library(kableExtra)   # Export LaTeX tables
+library(lavaan)                      # SEM
+library(semTools)                    # Reliability and plausible values
+library(BifactorIndicesCalculator)   # ECV and H statistics
+library(lessSEM)                     # Regularized multigroup CFA
+library(pbmcapply)                   # Parallel computation
+library(see)                         # Half violin plots
+library(gt)                          # Print HTML tables
+library(kableExtra)                  # Export LaTeX tables
 
 replicationData <- readRDS("../Data/replicationData.rds") %>%
   mutate(
@@ -152,6 +154,8 @@ replicationData$NarcissismSumScore <- rowSums(replicationData[, narcissismItems]
 ```
 
 ## Descriptives
+
+### Means
 
 ```{r}
 
@@ -355,6 +359,126 @@ if (export) {
     "../Tables/descriptivesTable.tex"
   )
 
+}
+```
+
+### Covariances
+
+```{r}
+
+corMatrix <- replicationData %>%
+  select(ends_with("SumScore"), c("Male", "Age")) %>%
+  cor() %>%
+  as.matrix()
+
+colnames(corMatrix) <- gsub("SumScore", "", colnames(corMatrix))
+rownames(corMatrix) <- gsub("SumScore", "", rownames(corMatrix))
+
+# --------------------------- PREPARE TABLE ---------------------------
+
+nVariables <- nrow(corMatrix)
+
+corFormatted <- matrix(
+  sprintf("%.2f", corMatrix),
+  nrow = nVariables,
+  dimnames = dimnames(corMatrix)
+)
+
+# Display the lower triangle, with dashes on the diagonal
+corFormatted[upper.tri(corFormatted)] <- ""
+diag(corFormatted) <- "—"
+
+variableLabels <- paste0(
+  seq_len(nVariables),
+  ". ",
+  rownames(corMatrix)
+)
+
+colnames(corFormatted) <- as.character(seq_len(nVariables))
+
+corTable <- data.frame(
+  Variable = variableLabels,
+  corFormatted,
+  check.names = FALSE,
+  row.names = NULL
+)
+
+# ------------------------------- GT ----------------------------------
+
+corGT <- corTable %>%
+  gt::gt(
+    rowname_col = "Variable"
+  ) %>%
+  gt::tab_stubhead(
+    label = "Variable"
+  ) %>%
+  gt::cols_align(
+    align = "center",
+    columns = -Variable
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+corGT
+
+if (export) {
+  
+  corGT_png <- corGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    corGT_png,
+    filename = "../Tables/corTable.png",
+    zoom = 3.125,
+    expand = 0
+  )
+  
+  # ------------------------------ LATEX --------------------------------
+  
+  corTableLatex <- corTable %>%
+    mutate(
+      across(
+        -Variable,
+        ~ gsub("—", "\\textemdash{}", .x, fixed = TRUE)
+      )
+    )
+  
+  corKable <- corTableLatex %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", nVariables))
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(corTableLatex) - 1),
+      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(corKable),
+    "../Tables/corTable.tex"
+  )
+  
+  corKable
+  
 }
 ```
 
@@ -734,6 +858,206 @@ summary(bifactorFit, fit.measures = TRUE, standardized = TRUE)
 ```
 
 ### Diagnostics
+
+#### Loadings
+
+```{r}
+
+loadingTable <- as.data.frame(lavInspect(bifactorFit, "std")$lambda)
+
+loadingTable$Item <- as.numeric(gsub("[^0-9]", "", rownames(loadingTable)))
+
+rownames(loadingTable) <- NULL
+
+loadingTable <- loadingTable%>%
+  select(Item, Reference, Narcissism, Psychopathy) %>%
+  arrange(Item) %>%
+  mutate(
+    across(
+      .cols = c(Reference, Narcissism, Psychopathy),
+      .fns = \ (x) sub("^(-?)0\\.", "\\1.", sprintf("%.2f", x))
+    )
+  ) %>%
+  mutate(
+    across(
+      .cols = c(Narcissism, Psychopathy),
+      .fns = \ (x) ifelse(x == ".00", "", x)
+    )
+  )
+
+# ------------------------------- GT ----------------------------------
+
+loadingGT <- loadingTable %>%
+  gt::gt(
+    rowname_col = "Item"
+  ) %>%
+  gt::tab_stubhead(
+    label = "Item"
+  ) %>%
+  gt::cols_align(
+    align = "center",
+    columns = -Item
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+loadingGT
+
+if (export) {
+  
+  loadingGT_png <- loadingGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    loadingGT_png,
+    filename = "../Tables/loadingTable.png",
+    zoom = 3.125,
+    expand = 0
+  )
+  
+  # ------------------------------ LATEX --------------------------------
+  
+  loadingTableLatex <- loadingTable %>%
+    mutate(
+      across(
+        -Item,
+        ~ gsub("—", "\\textemdash{}", .x, fixed = TRUE)
+      )
+    )
+  
+  loadingKable <- loadingTableLatex %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", 3))
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(loadingTableLatex) - 1)
+#      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(loadingKable),
+    "../Tables/loadingTable.tex"
+  )
+  
+  loadingKable
+  
+}
+```
+
+#### Bifactor indices
+
+```{r}
+
+indices <- bifactorIndices(bifactorFit, standardized = TRUE)
+
+indicesTable <- indices$FactorLevelIndices %>%
+  select(
+    ECV_SS, Omega, OmegaH, H, FD
+  ) %>%
+  rename(
+    ECV = ECV_SS
+  ) %>%
+  mutate(
+    across(
+      c(ECV, Omega, OmegaH, H, FD),
+      ~ sprintf("%.2f", .x)
+    )
+  ) %>%
+  tibble::rownames_to_column(var = "Factor")
+
+indicesTable
+
+indicesGT <- indicesTable %>%
+  gt::gt(
+    rowname_col = "Factor"
+  ) %>%
+  gt::tab_stubhead(label = "Factor") %>%
+  gt::fmt_markdown(
+    columns = -Factor
+  ) %>%
+  gt::cols_align(
+    align = "center",
+    columns = -Factor
+  ) %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(
+      groups = everything()
+    )
+  ) %>%
+  gt::tab_options(
+    table.font.names = c("Verdana", "Arial", "sans-serif"),
+    table.font.size = gt::px(11),
+    column_labels.font.weight = "bold",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.bottom.width = gt::px(1),
+    table_body.hlines.width = gt::px(0)
+  )
+
+indicesGT
+
+if(export) {
+  
+  indicesGT_png <- indicesGT %>%
+    gt::tab_options(
+      table.width = gt::px(624)
+    )
+  
+  gt::gtsave(
+    indicesGT_png,
+    filename = "../Tables/indicesTable.png",
+    zoom = 3.125,
+    expand = 0
+  )
+  
+  indicesKable <- indicesTable %>%
+    knitr::kable(
+      format = "latex",
+      booktabs = TRUE,
+      escape = FALSE,
+      align = c("l", rep("c", 5))
+    ) %>%
+    kableExtra::row_spec(
+      row = seq_len(nrow(indicesTable) - 1),
+      extra_latex_after = "\\addlinespace[0.5em]"
+    ) %>%
+    kableExtra::row_spec(
+      row = 0,
+      bold = TRUE
+    ) %>%
+    kableExtra::kable_styling(
+      latex_options = "basic",
+      full_width = FALSE,
+      position = "left"
+    )
+  
+  writeLines(
+    stretchLatexTable(indicesKable),
+    "../Tables/indicesTable.tex"
+  )
+  
+}
+```
 
 #### Invariance
 
